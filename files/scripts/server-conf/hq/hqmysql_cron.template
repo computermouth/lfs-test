@@ -1,0 +1,23 @@
+# m h  dom mon dow   command
+#HQ MySQL Drupal nightly full backup to DB server local hard disks
+10 0 * * * $HOME/scripts/backup/alldata_backup.sh drupal> $HOME/scripts/logs/dailybackup_drupal_today.log 2>&1;echo -e "Subject: Log file for Drupal backup\n\n $(cat $HOME/scripts/logs/dailybackup_drupal_today.log)" | /usr/sbin/sendmail -f MySQLDBA_HQ mysql_dba@businesswire.com; cat $HOME/scripts/logs/dailybackup_drupal_today.log >>$HOME/scripts/logs/dailybackup_drupal.log && rm $HOME/scripts/logs/dailybackup_drupal_today.log
+
+#HQ MySQL Aegir nightly full backup to DB server local hard disks
+10 0 * * * $HOME/scripts/backup/alldata_backup.sh aegir> $HOME/scripts/logs/dailybackup_aegir_today.log 2>&1; echo -e "Subject: Log file for aegir backup\n\n $(cat $HOME/scripts/logs/dailybackup_aegir_today.log)" | /usr/sbin/sendmail -f MySQLDBA_HQ  mysql_dba@businesswire.com; cat $HOME/scripts/logs/dailybackup_aegir_today.log >>$HOME/scripts/logs/dailybackup_aegir.log && rm $HOME/scripts/logs/dailybackup_aegir_today.log
+
+#HQ MySQL weekly binary log purge
+00 16 * * 4 $HOME/scripts/purge/PurgeAll.sh Zu0Cr0N! | /usr/sbin/sendmail -f MySQLDBA_HQ mysql_dba@businesswire.com 
+
+#HQ MySQL server half-hour replication status check
+0,30 * * * * $HOME/scripts/monitor/dbmonitor.sh Zu0Cr0N!>> $HOME/scripts/logs/dbmonitor.log 2>&1
+
+#HQ MySQL PROD monthly slow query reports: runs every first Thurday each month
+#MySQL slow query log report
+0 3 * * 4 $HOME/scripts/performance/queries/mysqlslowreport.sh mysql1.sfprod.businesswire.com> $HOME/scripts/logs/mysqlslowreport.log 2>&1
+
+
+#HQ MySQL servers daily slow query log and error log rotation
+#MySQL slow query log and error log rotation
+5 0 * * * $HOME/scripts/performance/queries/mysqllogrotate.sh > $HOME/scripts/logs/mysqllogrotate.log 2>&1
+
+#33 16 * * *  /bin/echo -e "Subject: Log file for Drupal backup\n\n $(cat $HOME/scripts/logs/dailybackup_drupal.log)" | /usr/sbin/sendmail -f MySQLDBA_HQ mysql_dba@businesswire.com

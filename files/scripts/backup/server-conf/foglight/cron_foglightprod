@@ -1,0 +1,7 @@
+#Job for Foglgith PROD and QA daily backup
+30 1 * * * /data/fms/mysql/scripts/backup/alldata_backup.sh > /data/fms/mysql/scripts/backup/alldata_backup.log; status=`grep 'ALARM' /data/fms/mysql/scripts/backup/alldata_backup.log`; [ -z "$status" ] && msubject="OK - MySQL Backup Foglight DB " || msubject="ALARM - MySQL Backup Foglight DB";  mailx -s "${msubject}" mysql_dba@businesswire.com < /data/fms/mysql/scripts/backup/alldata_backup.log 
+
+
+#0 3  * * * /data/fms/mysql/scripts/backup/bak/DBbackup_foglight.sh | mailx -u foglight  -s "Foglight DB daily backup" mysql_dba@businesswire.com
+0 5  * * * crontab -l > /data/fms/mysql/scripts/backup/crontab_foglightPROD.txt 
+* * * * * echo "`date`" >> /opt/fms/logs/gc.log 2>&1

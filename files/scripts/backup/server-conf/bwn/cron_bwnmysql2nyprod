@@ -1,0 +1,33 @@
+0,5,10,15,20,25,30,35,40,45,50,55 * * * * /usr/local/bin/ctlproc monitor all >> /var/opt/businesswire/ctlproc/mysql/logs/cmd.log 2>&1
+
+#BWN MySQL nightly full backup to DB server local hard disks
+#10 0 * * * $HOME/scripts/backup/alldata_backup.sh > $HOME/scripts/logs/dailybackup_today.log 2>&1;echo -e "Subject: Log file for BWN backup\n\n $(cat $HOME/scripts/logs/dailybackup_today.log)" | mailx -s "Log file for BWN backup" mysql_dba@businesswire.com <$HOME/scripts/logs/dailybackup_today.log; cat $HOME/scripts/logs/dailybackup_today.log >>$HOME/scripts/logs/dailybackup.log && rm $HOME/scripts/logs/dailybackup_today.log
+
+#BWN MySQL nightly full backup to DB server local hard disks 
+10 0  * * * $HOME/scripts/backup/alldata_backup.sh > $HOME/scripts/logs/bwndailybackup_today.log 2>&1;status=`grep 'ALARM' $HOME/scripts/logs/bwndailybackup_today.log`;sub="MySQL Backup BWN "; [ -z "$status" ] && msubject="OK -"${sub} || msubject="ALARM -"${sub}; echo -e "Subject: ${msubject}\n\n $(cat $HOME/scripts/logs/bwndailybackup_today.log)" | mailx -s "${msubject}" mysql_dba@businesswire.com <$HOME/scripts/logs/bwndailybackup_today.log; cat $HOME/scripts/logs/bwndailybackup_today.log >>$HOME/scripts/logs/bwndailybackup.log && rm $HOME/scripts/logs/bwndailybackup_todayt.log
+
+#BWN MySQL weekly binary log purge
+00 12 * * 4 $HOME/scripts/purge/PurgeAll.sh Zu0Cr0N! | mailx -s "BWN Binary Log Weekly Purge." mysql_dba@businesswire.com
+
+
+#BWN MySQL PROD monthly slow query reports: runs every first Thurday each month
+#MySQL slow query log report
+0 3 * * 4 $HOME/scripts/performance/queries/mysqlslowreport.sh bwnmysql1.sfprod.businesswire.com> $HOME/scripts/logs/mysqlslowreport.log 2>&1
+
+#BWN MySQL servers daily slow query log and error log rotation
+#MySQL slow query log and error log rotation
+5 0 * * * $HOME/scripts/performance/queries/mysqllogrotate.sh > $HOME/scripts/logs/mysqllogrotate.log 2>&1
+
+
+#BWN MySQL servers weekly checksum between Master and Slave  ( BWN QA) 
+#MySQL Replication Data Integrity Check
+0 23 * * 6 $HOME/scripts/utility/checksum/checktables.sh BWNQA bwnmysql1.sftest.businesswire.com bwnmysql2.nytest.businesswire.com > $HOME/scripts/logs/BWNQAchecksum.log 2>&1; status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/BWNQA_CHECKSUM_RECHECK_result.log`; [ -z "$status" ] && msubject="Weekly BWNQA Replication Integrity Check OK" || msubject="Weekly BWNQA Replication Integrity Check - ALARM";  mailx -s "${msubject}" mysql_dba@businesswire.com <  $HOME/scripts/utility/checksum/result/BWNQA_CHECKSUM_RECHECK_result.log 
+
+#BWN MySQL servers weekly checksum between Master and Slave  ( BWN PROD) 
+#MySQL Replication Data Integrity Check
+0 23 * * 6 $HOME/scripts/utility/checksum/checktables.sh BWNPROD bwnmysql2.sfprod.businesswire.com bwnmysql2.nyprod.businesswire.com > $HOME/scripts/logs/BWNPRODchecksum.log 2>&1; status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/BWNPROD_CHECKSUM_RECHECK_result.log`; [ -z "$status" ] && msubject="Weekly BWNPROD Replication Integrity Check OK" || msubject="Weekly BWNPROD Replication Integrity Check - ALARM";  mailx -s "${msubject}" mysql_dba@businesswire.com <  $HOME/scripts/utility/checksum/result/BWNPROD_CHECKSUM_RECHECK_result.log 
+
+# HQ MySQL sever weekly checksum result ( HQ PROD)
+30 0 * * 6 $HOME/scripts/utility/checksum/checktables.sh  HQPROD mysql1.sfprod.businesswire.com mysql1.nyprod.businesswire.com > $HOME/scripts/logs/HQPRODchecksum.log 2>&1; status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/HQPROD_CHECKSUM_RECHECK_result.log`; [ -z "$status" ] && msubject="Weekly HQPROD Replication Integrity Check OK" || msubject="Weekly HQPROD Replication Integrity Check - ALARM";  cat $HOME/scripts/utility/checksum/result/HQPROD_CHECKSUM_RECHECK_result.log $HOME/scripts/utility/checksum/result/HQPROD_CHECKSUM_RECHECK_result.log $HOME/scripts/utility/checksum/result/HQPROD_checksume_result.log| mailx -s "${msubject}" mysql_dba@businesswire.com; mv $HOME/scripts/utility/checksum/result/HQPROD_checksume_result.log  $HOME/scripts/utility/checksum/result/HQPROD_checksume_result.log.bak 
+
+

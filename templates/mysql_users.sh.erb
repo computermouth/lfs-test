@@ -1,0 +1,82 @@
+#!/bin/bash
+
+if [  -f "/root/.mysql_secret" ]; then
+	randfile="/root/.mysql_secret"
+elif [ -f "/.mysql_secret" ]; then
+	randfile="/.mysql_secret"
+else
+	echo "can't find .mysql_secret."
+ 	exit 1
+fi
+
+oldpw=`tac ${randfile} | grep -m 1 'local time):' | awk '{print  $18}' | cut -d ' ' -f1`
+/bin/echo "oldpw is ${oldpw}"
+newpw='welcome!!!'
+/bin/echo "Change root password "
+mysqladmin -u root -p${oldpw}  password ${newpw} 
+
+<%- if @bw_lifecycle == 'local' -%>
+    farmid='hq'
+<%- else -%>
+    farmid='<%= @hq_farmid %>'
+<%- end -%>	
+
+#create a user for aegir
+echo "create user for aegir"
+<% if @bw_lifecycle == 'prod' %>
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'${farmid}%' IDENTIFIED BY PASSWORD '*DF216F57F1F2066124E1AA5491D995C3CB57E4C2'  WITH GRANT OPTION;"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'localhost' IDENTIFIED BY PASSWORD '*DF216F57F1F2066124E1AA5491D995C3CB57E4C2'  WITH GRANT OPTION;"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'127.0.0.1' IDENTIFIED BY PASSWORD '*DF216F57F1F2066124E1AA5491D995C3CB57E4C2'  WITH GRANT OPTION;"
+<% else %>
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'${farmid}%' IDENTIFIED BY PASSWORD '*8A3C588F40A6B76F81C44844C881AF360B759CB9' WITH GRANT OPTION;"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'localhost' IDENTIFIED BY PASSWORD '*8A3C588F40A6B76F81C44844C881AF360B759CB9' WITH GRANT OPTION;"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON *.* TO 'aegir_dbuser'@'127.0.0.1' IDENTIFIED BY PASSWORD '*8A3C588F40A6B76F81C44844C881AF360B759CB9' WITH GRANT OPTION;"
+<% end %>
+
+# Create repl user for replication 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'${farmid}mysql%' IDENTIFIED BY PASSWORD '*468D9B1DCEAC8759778A20B69AB19FA554590C32';"
+
+echo "create switchover database...."
+/usr/bin/mysql -u root -p${newpw} -e "create database sodb;" 
+
+echo "create user for monitor"
+#create users for mysql enterprise monitor 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, PROCESS, SHOW DATABASES, SUPER, REPLICATION CLIENT ON *.* TO 'emagent'@'localhost' IDENTIFIED BY PASSWORD '*F8800CA7B2CE7357496F71948BCC6A89FF153AFC';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, INSERT, CREATE ON mysql.* TO 'emagent'@'localhost';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, PROCESS, SHOW DATABASES, SUPER, REPLICATION CLIENT ON *.* TO 'emagent'@'127.0.0.1' IDENTIFIED BY PASSWORD '*F8800CA7B2CE7357496F71948BCC6A89FF153AFC';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, INSERT, CREATE ON mysql.* TO 'emagent'@'127.0.0.1';" 
+
+echo "create users for mysql routine tasks - backup, binlog purge"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, RELOAD, LOCK TABLES, SHOW DATABASES,REPLICATION CLIENT ON *.* TO 'backupuser'@'localhost' IDENTIFIED BY PASSWORD '*17CDA17B651D348979685F45F37243B365926ED3';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, RELOAD, LOCK TABLES, SHOW DATABASES, REPLICATION CLIENT ON *.* TO 'backupuser'@'${farmid}mysql%' IDENTIFIED BY PASSWORD '*17CDA17B651D348979685F45F37243B365926ED3';" 
+
+/usr/bin/mysql -u root -p${newpw} -e "GRANT CREATE, INSERT, DROP ON mysql.backup_progress TO 'backupuser'@'localhost';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT CREATE, INSERT, DROP ON mysql.backup_history TO 'backupuser'@'localhost';"
+
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, INSERT, UPDATE ON mysql.* TO 'dbaopt'@'${farmid}mysql%';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES on sodb.* TO 'dbaopt'@'${farmid}mysql%';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT SELECT, INSERT, UPDATE ON mysql.* TO 'dbaopt'@'localhost';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT ALL PRIVILEGES ON sodb.* TO 'dbaopt'@'localhost';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT RELOAD,PROCESS, SUPER ON *.* TO 'dbaopt'@'${farmid}mysql%' IDENTIFIED BY PASSWORD '*8D10C668248C3CB8D59504F320383D4884CA8472';" 
+/usr/bin/mysql -u root -p${newpw} -e "GRANT RELOAD,PROCESS, SUPER ON *.* TO 'dbaopt'@'localhost' IDENTIFIED BY PASSWORD '*8D10C668248C3CB8D59504F320383D4884CA8472';" 
+
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'loadtester'@'localhost' IDENTIFIED BY      PASSWORD '*E71F0DC427154299C19603696FA7C489E7795465';"
+/usr/bin/mysql -u root -p${newpw} -e " GRANT ALL PRIVILEGES ON slaptest.* TO 'loadtester'@'localhost'"; 
+
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'loadtester'@'${farmid}mysql%' IDENTIFIED BY      PASSWORD '*E71F0DC427154299C19603696FA7C489E7795465';"
+/usr/bin/mysql -u root -p${newpw} -e " GRANT ALL PRIVILEGES ON slaptest.* TO 'loadtester'@'${farmid}mysql%';" 
+
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'loadtester'@'localhost' IDENTIFIED BY      PASSWORD '*E71F0DC427154299C19603696FA7C489E7795465';"
+/usr/bin/mysql -u root -p${newpw} -e " GRANT ALL PRIVILEGES ON slaptest.* TO 'loadtester'@'localhost';" 
+
+echo "create read only user for connections from internal workstations"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'readuser''@'192.168.209.%' IDENTIFIED BY   PASSWORD '*9F1E0EAF66295B3D98A57D733F64202A91012B88';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'readuser''@'192.168.110.%' IDENTIFIED BY   PASSWORD '*9F1E0EAF66295B3D98A57D733F64202A91012B88';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'readuser''@'192.168.128.%' IDENTIFIED BY   PASSWORD '*9F1E0EAF66295B3D98A57D733F64202A91012B88';"
+/usr/bin/mysql -u root -p${newpw} -e "GRANT USAGE ON *.* TO 'readuser''@'192.168.129.%' IDENTIFIED BY   PASSWORD '*9F1E0EAF66295B3D98A57D733F64202A91012B88';"
+
+echo "change default user name"
+
+
+#change sysadmin user from root to bw_dbuser and reset with encryped password again
+/usr/bin/mysql -u root -p${newpw} -e "update mysql.user set user='bw_dbuser',password='*DF216F57F1F2066124E1AA5491D995C3CB57E4C2' where user='root'; flush privileges;"

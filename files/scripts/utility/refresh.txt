@@ -1,0 +1,94 @@
+BWN SOlr and Bwn mysql refresh
+
+bwnmysql2.nyprod.businesswire.com
+
+stop slave
+
+
+bwnsolr2.nyprod.businesswire.com
+
+ctlproc stop bwnsolr
+
+
+
+
+bwnmysql2.nyprod:
+
+~/mysql.env; mysqlbackup -u root -p  --with-timestamp --compress --no-locking --no-history-logging --connect-if-online --backup-dir=/var/mysql/backup --backup-image=bwnmysql2.nyprod.img.gz backup-to-image
+
+
+bwnsolr1.sfint.businesswire.com
+
+mkdir /var/solr/news/prod_data/index
+scp bwnsolr2.nyprod.businesswire.com:/var/solr/news/data/index/*   /var/solr/news/prod_data/index/
+
+  
+*****************************************  
+  
+bwnsolr2.sfint
+
+rm -r /var/solr/news/data
+mv /var/solr/news/prod_data  /var/solr/data
+ctlproc start bwnsolr  
+
+
+
+
+bwnmysql1.sfint
+
+cd /var/mysql/backup
+scp bwnmysql2.nyprod.businesswire.com:/var/mysql/backup/2013-01-08_16-19-19/bwnmysql2.nyprod.img.gz /var/mysql/backup
+
+. ~/mysql.env; mysqlbackup  --backup-image=/var/mysql/backup/20130108/bwnmysql2.nyprod.img.gz --backup-dir=/var/mysql/backup/20130108 extract
+
+mkdir /var/mysql/backup/20130108
+mv bwnmysql2.nyprod.img.gz 20130108/
+applog
+. ~/mysql.env; mysqlbackup --uncompress --backup-dir=/var/mysql/backup/20130108 apply-log
+
+
+backup mysql database on bwnmysql1.sfint before data restore
+
+cd /var/mysql/backup
+mysqldump -u root -p  mysql > bwnmysql1.sfint.mysql_backup.sql 
+
+
+ctlproc stop bwnmysql
+
+cd /var/mysql/data
+rm -rf *  it will take a while with about 100G data
+mv /var/mysql/backup/20130108/datadir/*  /var/mysql/data
+
+
+reload mysql system tables
+
+cd /var/mysql/backup
+
+ mysql -u root -p  mysql< bwnmysql1.sfint.mysql_backup.sql
+Enter password:   <- use source database password, here is prod root password
+
+check if mysql is running fine
+mysql -u root -p   <- using password from source database , here is prod password
+
+mysql> use mysql;
+mysql>select host,user from mysql
+you shoudl see this
+
+ %.sfint.businesswire.com     | bwn 
+ 
+ mysql> flush privileges;  <- let mysql reload the users from mysql.user table
+ 
+ 
+ to make it clean, bounce mysql
+ 
+ ctlproc stop bwnmysql
+ ctlproc start bwnmysql
+ 
+ login with int password
+ mysql -u root -p
+ 
+ 
+
+
+
+

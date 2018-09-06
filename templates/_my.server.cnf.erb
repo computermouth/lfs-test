@@ -1,0 +1,60 @@
+
+#SERVER: MySQL SERVER WITH HIGH PERFORMANCE DISK
+#plugin-load=thread_pool.so  #could cause serious performance problem
+plugin-load=validate_password.so
+
+sync_binlog=1 
+innodb_flush_log_at_trx_commit = 1
+
+innodb_io_capacity=800
+innodb_buffer_pool_instances=2
+
+<% if @bw_lifecycle == 'prod' || @bw_lifecycle == 'test' -%>
+innodb_buffer_pool_size=8192M
+innodb_read_io_threads=8
+innodb_write_io_threads=8
+<% else  -%>
+innodb_buffer_pool_size=2048M
+innodb_read_io_threads=4
+innodb_write_io_threads=4
+<% end -%>
+
+table_open_cache         = 6000
+table_definition_cache = 6000
+
+
+<% if @hq_farmid == 'hq4' -%>
+log_bin_trust_function_creators=on
+<% end -%>
+
+#DDL meta lock timeout
+lock_wait_timeout=300
+open_files_limit = 65535  # set this number = table cache * max connection, need OS has same conf ulimit -u
+#END SERVER
+
+
+#PASSWORD SECURITY POLICY MySQL 5.6 ONLY
+validate-password=FORCE_PLUS_PERMANENT
+validate_password_length=10
+validate_password_mixed_case_count=1
+validate_password_number_count=1
+validate_password_special_char_count=1
+validate_password_policy=LOW
+
+#END PASSWORD SECURITY POLICY MySQL 5.6 ONLY
+
+#REPLICATION
+binlog_format=MIXED
+log-bin= mysql-bin
+log-bin-index=mysql-bin.index
+log-slave-updates =1	
+
+skip_slave_start
+
+relay-log=mysql-relay-bin
+relay-log-index=mysql-relay-bin.index
+
+gtid_mode=on
+enforce_gtid_consistency=true
+
+#END REPLICATION

@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# All MySQL related scripts should be able to catch ctrl^c 
+trap 'increment' 2
+
+increment()
+{
+  echo "Caught SIGINT ..."
+  echo "Okay, I'll quit ..."
+  exit 1
+}
+
+
+
+if [ -f $HOME/mysql.env ];then
+        . $HOME/mysql.env
+fi
+
+#HQ2 doesnt have global.env , the global variables bw_x are defined by puppet, can be accessed throught environment variables such as $BW_CYCLE,$BW_LOCATION, $BW_ROLE
+
+if [ -f /opt/businesswire/config/global.env ];then
+        . /opt/businesswire/config/global.env
+fi
+
+
+CLUSTERNAME="jcon"
+NODE=1
+
+#Setup which datacenters are invloved.  SCNY=0  includes SC and SC  SCNY=1  includes SC and NY
+SCNY=0
+
+INTERACTIVE=1
+DEBUG=1
+TEST=0
+
+
+YES=1
+NO=0
+WRONGSTATUS=-1
+
+NOTSURE=-1
+UP=1
+DOWN=0
+
+ALERTEMAIL="min.chen@businesswire.com"
+
+BACKUP_DIR=/var/mysql/backup
+DATA_DIR=/var/mysql/data
+DATENUM=`date +%Y%m%d-%H%M`
+DATEDIR=`date +%Y%m%d%H%M`
+#DATEDIR="201404251643"
+#DATENUM="20140425-1643"
+BACKUP_DIR_TEMP="/var/mysql/backup/${DATEDIR}"
+#MYSQL_LOG_FILE="/var/mysql/logs/error_log.err"
+
+USER="mysql"
+ROOT="bw_dbuser"
+
+SSH_KEY="${HOME}/.ssh/mysqldba_dsa"
+SSH_CMD=`which ssh`
+if  [ -z "$SSH_KEY" ];then
+	SSH="${SSH_CMD}"
+else
+	SSH="${SSH_CMD} -i ${SSH_KEY}"
+fi
+
+GREEN="\033[1;32m"
+RED="\033[1;4;31m"
+NORMAL="\033[0m"
+
+OK=1
+FAILED=0
+
+

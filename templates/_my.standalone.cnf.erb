@@ -1,0 +1,19 @@
+
+#STANDALONE: THIS SECTION IS FOR STANDALONE MySQL ONLY, NOT SAFE FOR PROD
+performance-schema=OFF
+
+sync_binlog=0 
+
+innodb_flush_log_at_trx_commit = 0
+
+innodb_io_capacity=200
+
+innodb_buffer_pool_size=2048M
+innodb_buffer_pool_instances=2
+
+innodb_read_io_threads=4
+innodb_write_io_threads=4
+
+#END STANDALONE
+
+

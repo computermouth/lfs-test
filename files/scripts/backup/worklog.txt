@@ -1,0 +1,39 @@
+
+
+########## Create directories
+mkdir /export/home/mysql/scripts
+chown -R mysql:mysql /export/home/mysql/scripts
+chmod -R 700 /export/home/mysq/scripts
+
+mkdir /var/mysql/backup
+chown -R mysql:mysql /var/mysql/backup
+chmod -R 700 /var/mysql/backup
+
+copy backup.sh to /export/home/mysql/scripts/backup
+
+[sfprodi6-z3]:/export/home/mysql/scripts# chown mysql:mysql backup.sh
+[sfprodi6-z3]:/export/home/mysql/scripts# chmod 755 backup.sh
+
+########## setup cron job 
+
+###if mysql is not a login user, unlock OS user mysql so than backup.sh can be run as a cron job under mysql :
+
+login as root
+#passwd -s mysql
+mysql     LK
+#passwd -u mysql
+
+passwd: password information changed for mysql
+# passwd mysql
+New Password:
+Re-enter new Password:
+passwd: password successfully changed for mysql
+
+vi /etc/passwd
+change mysql to use /usr/bin/bash 
+
+#su - mysql
+#export EDITOR=vi
+#crontab -e mysql
+0 0 * * * /export/home/mysql/scripts/backup.sh drupal> /export/home/mysql/scripts/dailybackup_drupal.log
+0 0 * * * /export/home/mysql/scripts/backup.sh aegir> /export/home/mysql/scripts/dailybackup_aegir.log

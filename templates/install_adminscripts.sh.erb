@@ -1,0 +1,23 @@
+#/bin/bash
+logfile="<%= scope.lookupvar("hq_mysql::mysql_admin::installlogfile") %>"
+echo `date` > $logfile
+#Install MySQL admin scripts and make them cluster ready
+echo "Install cron job template ...." >> $logfile
+cp <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/server-conf/<%= scope.lookupvar("hq_mysql::mysql_admin::clustername") %>/*  <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/
+echo "Done" >> $logfile
+
+echo "Install backup configureation files for cluter <%= scope.lookupvar("hq_mysql::mysql_admin::clustername") %> ....">> $logfile
+cp <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/backup/server-conf/<%= scope.lookupvar("hq_mysql::mysql_admin::clustername") %>/* <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/backup/
+echo "Done" >> $logfile
+
+echo "Install replication monitor configureation files for cluter <%= @clustername %> ....">> $logfile
+cp <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/monitor/server-conf/<%= scope.lookupvar("hq_mysql::mysql_admin::clustername") %>/* <%= scope.lookupvar("hq_mysql::mysql_admin::scriptsdir") %>/monitor/
+echo "Done" >> $logfile
+
+#echo "Cleaning up the temporary files...." >> $logfile
+#rm -rf <%= @scriptsdir %>/server-conf
+#rm -rf <%= @scriptsdir %>/backup/server-conf
+#echo "Done" >> $logfile
+
+
+echo "Installation is complete."  >> $logfile

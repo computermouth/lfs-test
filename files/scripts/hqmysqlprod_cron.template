@@ -1,0 +1,39 @@
+PATH=/sbin:/usr/bin:/bin:/usr/sbin
+SHELL=/bin/bash
+#MAILTO="mysql_dba@businesswire.com"
+
+#HQ MySQL nightly full backup to DB server local hard disks
+0 1 * * * $HOME/scripts/backup/alldata_backup.sh 2>&1 | tee $HOME/scripts/logs/dailybackup_drupal_today.log 2>&1;status=`grep 'ALARM' $HOME/scripts/logs/dailybackup_drupal_today.log`;sub="MySQL Backup HQ4"; [ -z "$status" ] && msubject="SUCCEED -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}"  |  cat - $HOME/scripts/logs/dailybackup_drupal_today.log | /usr/sbin/sendmail  mysql_dba@businesswire.com; mv $HOME/scripts/logs/dailybackup_drupal_today.log $HOME/scripts/logs/dailybackup_drupal_`date +\%d\%m\%y`.log
+
+#HQ MySQL weekly binary log purge
+30 22 * * * $HOME/scripts/purge/PurgeAll_hq4.sh Zu0Cr0N! 2>&1 | tee $HOME/scripts/logs/PurgeAll_today.log; status=`grep 'Error' $HOME/scripts/logs/PurgeAll_today.log`; sed -i 's/Zu0Cr0N!/xxxx/g' $HOME/scripts/logs/PurgeAll_today.log; sub="HQ4 weekly binary log purge"; [ -z "$status" ] && msubject="SUCCEED -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}" | cat - $HOME/scripts/logs/PurgeAll_today.log | /usr/sbin/sendmail mysql_dba@businesswire.com; mv $HOME/scripts/logs/PurgeAll_today.log $HOME/scripts/logs/PurgeAll_`date +\%d\%m\%y`.log
+
+#HQ MySQL servers daily slow query log and error log rotation
+#MySQL slow query log and error log rotation
+5 0 * * * $HOME/scripts/performance/queries/mysqllogrotate_hq4.sh 2>&1 | tee $HOME/scripts/logs/mysqllogrotate.log;status=`grep 'ALARM' $HOME/scripts/logs/mysqllogrotate.log`;sub="MySQL daily error/slow log rotate HQ4"; [ -z "$status" ] && msubject="SUCCEED -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}" | cat - $HOME/scripts/logs/mysqllogrotate.log | /usr/sbin/sendmail mysql_dba@businesswire.com; mv $HOME/scripts/logs/mysqllogrotate.log $HOME/scripts/logs/mysqllogrotate_`date +\%d\%m\%y`.log
+
+#HQ daily GTID_EXECTED check
+30 5 * * * $HOME/scripts/monitor/GTIDmonitor.py 2>&1 | tee $HOME/scripts/logs/GTIDmonitor_today.log; status=`grep -i 'Error\|ALARM' $HOME/scripts/logs/GTIDmonitor_today.log`;sub="HQ4PROD daily GTID_EXECUTED check"; [ -z "$status" ] && msubject="SUCCEED -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}\n\n $(cat $HOME/scripts/logs/GTIDmonitor_today.log)" |  mailx -s "${msubject}" mysql_dba@businesswire.com<$HOME/scripts/logs/GTIDmonitor_today.log; mv $HOME/scripts/logs/GTIDmonitor_today.log $HOME/scripts/logs/GTIDmonitor_`date +\%d\%m\%y`.log
+
+# Create the aegir and task access users from NY since aegir is the in the AEGIR cluster
+5 0 * * * $HOME/scripts/utility/GrantNYAegirTaskUsers.sh 2>&1 | tee  $HOME/scripts/logs/SCNYuserscheckup_today.log ;status=`grep 'ALARM' $HOME/scripts/logs/SCNYuserscheckup_today.log`;sub="MySQL Replication SC/NY task and Aegir users checkup HQ4PROD"; [ -z "$status" ] && msubject="NO ACTION NEEDED -"${sub} || msubject="USER ADDED -"${sub};echo  "Subject: ${msubject}" | cat - $HOME/scripts/logs/SCNYuserscheckup_today.log | /usr/sbin/sendmail mysql_dba@businesswire.com; mv $HOME/scripts/logs/SCNYuserscheckup_today.log $HOME/scripts/logs/SCNYuserscheckup_`date +\%d\%m\%y`.log
+
+#HQ MySQL PROD monthly slow query reports: runs every first Thurday each month
+#MySQL slow query log report
+0 3 * * 5 $HOME/scripts/performance/queries/mysqlslowreport.sh hq4mysql1.scprod.businesswire.com 2>&1 | tee $HOME/scripts/logs/mysqlslowreportSC_`date +\%d\%m\%y`.log
+
+
+#MySQL servers weekly checksum between Master and Slave  ( HQ4MySQL PROD)
+#MySQL Replication Data Integrity Check
+0 2 * * 6 $HOME/scripts/utility/checksum/checktables.sh hq4mysqlprod hq4mysql2.nyprod.businesswire.com hq4mysql2.scprod.businesswire.com 2>&1 | tee $HOME/scripts/logs/hq4mysqlPRODchecksum_today.log; status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/hq4mysqlprod_CHECKSUM_RECHECK_result.log;grep 'ERROR' ${HOME}/scripts/logs/hq4mysqlPRODchecksum_today.log`; [ -z "$status" ] && msubject="SUCCEED -Weekly hq4mysqlprod Replication Integrity Check" || msubject="ALARM -Weekly hq4mysqlprod Replication Integrity Check";echo -e "Subject: ${msubject}\n\n $(cat  $HOME/scripts/utility/checksum/result/hq4mysqlprod_CHECKSUM_RECHECK_result.log)" | /usr/sbin/sendmail mysql_dba@businesswire.com; mv  $HOME/scripts/utility/checksum/result/hq4mysqlprod_CHECKSUM_RECHECK_result.log $HOME/scripts/logs/hq4mysqlprod_CHECKSUM_RECHECK_result_`date +\%d\%m\%y`.log; mv $HOME/scripts/logs/hq4mysqlPRODchecksum_today.log $HOME/scripts/logs/hq4mysqlPRODchecksum_`date +\%d\%m\%y`.log
+
+#MySQL servers weekly checksum between Master and Slave  ( HQ4MySQL QA )
+#MySQL Replication Data Integrity Check
+0 0 * * 6 /usr/bin/ssh -i $HOME/.ssh/mysqldba_hq_dsa mysql@hq4mysql2.nytest.businesswire.com ". ~/mysql.env; \$SCRIPT_PATH/utility/checksum/checktables.sh hq4mysqltest hq4mysql1.sctest.businesswire.com hq4mysql2.nytest.businesswire.com" 2>&1 | tee $HOME/scripts/logs/hq4mysqlTESTchecksum_today.log; scp -i $HOME/.ssh/mysqldba_hq_dsa mysql@hq4mysql2.nytest.businesswire.com:/home/mysql/scripts/utility/checksum/result/hq4mysqltest_CHECKSUM_RECHECK_result.log /home/mysql/scripts/utility/checksum/result/;status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/hq4mysqltest_CHECKSUM_RECHECK_result.log;grep 'ERROR' ${HOME}/scripts/logs/hq4mysqltestchecksum_today.log`; [ -z "$status" ] && msubject="SUCCEED -Weekly hq4mysqltest Replication Integrity Check" || msubject="ALARM -Weekly hq4mysqltest Replication Integrity Check";echo -e "Subject: ${msubject}\n\n $(cat  $HOME/scripts/utility/checksum/result/hq4mysqltest_CHECKSUM_RECHECK_result.log)" | /usr/sbin/sendmail mysql_dba@businesswire.com; mv  $HOME/scripts/utility/checksum/result/hq4mysqltest_CHECKSUM_RECHECK_result.log  $HOME/scripts/logs/hq4mysqltest_CHECKSUM_RECHECK_result_`date +\%d\%m\%y`.log;mv $HOME/scripts/logs/hq4mysqlTESTchecksum_today.log $HOME/scripts/logs/hq4mysqlTESTchecksum_`date +\%d\%m\%y`.log
+
+#Cron job monitor
+0 8 * * * $HOME/scripts/monitor/cronmonitor_hq4.sh 720 2>&1 | tee $HOME/scripts/logs/cronmonitor_today.log;echo -e "Subject: cron monitor - HQ4PROD\n\n $(cat  $HOME/scripts/logs/cronmonitor_today.log)" | /usr/sbin/sendmail mysql_dba@businesswire.com;mv $HOME/scripts/logs/cronmonitor_today.log $HOME/scripts/logs/cronmonitor_`date +\%d\%m\%y`.log 
+
+#MySQL scripts log files weekly clean Up
+0 0 * * 6 find /home/mysql/scripts/logs/ -type f -mtime +30 -exec rm {} \;
+

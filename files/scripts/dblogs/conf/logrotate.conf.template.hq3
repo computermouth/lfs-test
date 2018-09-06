@@ -1,0 +1,28 @@
+#/bin/bash
+datum=`date +%Y%m%d-%H%M`
+
+MYSQL_SLOW_LOG_DIR="/var/mysql/logs/"
+MYSQL_ERROR_LOG_DIR="/var/mysql/logs/"
+MYSQL_ARCHIVE_LOG_DIR="/var/mysql/logs/archive/"
+
+SSH_USER="mysql"
+SSH_CMD=`which ssh` 
+#SSH="${SSH_CMD} -i $HOME/.ssh/xxx"
+SSH="${SSH_CMD}"
+
+MYSQL_USER="dbaopt"
+MYSQL_PASSWORD="Zu0Cr0N!"
+MYSQLCMD=`which mysql`
+
+SLOW_RETENTION=10 # days
+ERROR_RETENTION=90 # days
+
+
+DEBUG=1
+
+# List all the servers which need to get slow log, error log rotated
+declare -a servers 
+dbservers=("hq3mysql2.nyprod.businesswire.com" "hq3mysql1.nyprod.businesswire.com"  "hq3mysql2.scprod.businesswire.com" "hq3mysql1.scprod.businesswire.com" "hq3mysql2.sctest.businesswire.com"  "hq3mysql1.sctest.businesswire.com" )
+dbs=(`echo ${dbservers[@]}`)
+
+ALARM="ALARM"

@@ -1,0 +1,93 @@
+[mysqld]
+datadir=/var/mysql/data
+socket=/var/mysql/tmp/mysql.sock
+user=mysql
+port=3306
+slow_query_log=1
+slow_query_log_file=/var/mysql/logs/slow_query.log
+long_query_time=0.1
+log-warnings=2
+back_log=1500
+max_connect_errors=10000
+
+
+# Disabling symbolic-links is recommended to prevent assorted security risks
+symbolic-links=0
+skip-show-database=ON
+safe-user-create=ON
+
+# Instead of skip-networking the default is now to listen only on
+# localhost which is more compatible and is not less secure.
+# bind-address		= 127.0.0.1
+
+collation_server	      = utf8_general_ci
+character_set_server	  = utf8
+
+# InnoDB
+default_storage_engine	= innodb
+autocommit=ON     # default enabled
+#innodb_buffer_pool_size	= 2048M # TUNABLE: This should be as big as possible
+innodb_log_file_size	  = 300M # TUNABLE: how much data do we keep in log for recovery?
+innodb_log_buffer_size=16M
+innodb_table_locks=ON   #make innodb aware of LOCK TABLES
+
+# may mean less than 100% acid-compliance if set to 0
+innodb_flush_log_at_trx_commit = 1
+#innodb_flush_method	    = O_DIRECT
+
+
+# MySQL5.6 only
+secure_file_priv=""
+binlog_checksum=NONE
+binlog_order_commits=OFF
+performance-schema=OFF
+innodb_flush_neighbors=0
+innodb_file_per_table	  = off
+#innodb_buffer_pool_instances=2
+innodb_stats_persistent=OFF
+
+#innodb_read_io_threads=8
+#innodb_write_io_threads=8
+
+<% if @bw_role == 'hq_workstation' %>
+        <%= scope.function_template(['hq_mysql/_my.standalone.cnf.erb']) %>
+<% else %>
+        <%= scope.function_template(['hq_mysql/_my.server.cnf.erb']) %>
+<% end %>
+
+# Fine Tuning
+key_buffer_size     = 64M # TUNABLE: for temp tables
+max_allowed_packet	= 128M
+#safe to set to 0 only if raid card has battery backup
+
+# set to a little greater than apache maxclients
+max_connections     = 1500 # TUNABLE this should be slightly more than active php threads
+thread_cache_size	=180
+wait_timeout= 7200
+
+query_cache_size=0
+query_cache_type=0
+
+# Per-connection configuration
+thread_stack		= 192K
+sort_buffer_size	= 5M
+read_buffer_size	= 200k
+join_buffer_size	= 5M
+bulk_insert_buffer_size	= 8M
+
+
+
+
+[mysqld_safe]
+log-error=/var/mysql/logs/error_log
+log-warnings=2
+pid-file=/var/mysql/data/mysqld.pid
+
+[client]
+socket=/var/mysql/tmp/mysql.sock
+
+[isamchk]
+# only for MyISAM but temp tables are MyISAM
+key_buffer_size   = 64M #TUNABLE: match above
+
+!include /etc/my_local.cnf

@@ -1,0 +1,18 @@
+#/bin/bash
+
+logfile="<%= @ADDPUBKEYLOG %>"
+echo `date` > $logfile
+KEYFILE="<%= @KEYFILE %>"
+PUBKEY=$(cat $KEYFILE)
+AUTHORIZED_KEYFILE="<%= @AUTHORIZEDKEYFILE %>"
+
+echo "Adding ${PUBKEY} to ${AUTHORIZED_KEYFILE} ...." >> $logfile
+# Add MySQL DBA public key into the authorized key files if it doesnt exist
+if ! grep -q "${PUBKEY}"  "${AUTHORIZED_KEYFILE}" ; then
+	echo "${PUBKEY}" >> $AUTHORIZED_KEYFILE
+	echo "Added" >> $logfile
+else
+	echo "$PUBKEY already exist in $AUTHORIZED_KEYFILE.. skip"  >> $logfile
+fi
+
+echo "Complete."  >> $logfile

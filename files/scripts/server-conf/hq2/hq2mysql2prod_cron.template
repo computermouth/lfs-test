@@ -1,0 +1,32 @@
+PATH=/sbin:/usr/bin:/bin:/usr/sbin
+SHELL=/bin/bash
+mailto=mysql_dba@businesswire.com
+
+#HQ MySQL nightly full backup to DB server local hard disks
+0 1 * * * $HOME/scripts/backup/alldata_backup.sh 2>&1 | tee $HOME/scripts/logs/dailybackup_drupal_today.log 2>&1;status=`grep 'ALARM' $HOME/scripts/logs//dailybackup_drupal_today.log`;sub="MySQL Backup HQ2"; [ -z "$status" ] && msubject="OK -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}"  |  cat - $HOME/scripts/logs/dailybackup_drupal_today.log | /usr/sbin/sendmail -f MySQLDBA_HQ2 mysql_dba@businesswire.com; cat $HOME/scripts/logs/dailybackup_drupal_today.log >>$HOME/scripts/logs/dailybackup_drupal.log && rm $HOME/scripts/logs/dailybackup_drupal_today.log
+
+#HQ MySQL weekly binary log purge
+10 13 * * * $HOME/scripts/purge/PurgeAll.sh Zu0Cr0N! 2>&1 | tee $HOME/scripts/logs/PurgeAll.log; status=`grep 'Error' $HOME/scripts/logs/PurgeAll.log`;sub="HQ2 weekly binary log purge"; [ -z "$status" ] && msubject="OK -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}" | cat - $HOME/scripts/logs/PurgeAll.log | /usr/sbin/sendmail -f MySQLDBA_HQ2 mysql_dba@businesswire.com
+
+#HQ MySQL servers daily slow query log and error log rotation
+#MySQL slow query log and error log rotation
+5 0 * * * $HOME/scripts/performance/queries/mysqllogrotate.sh 2>&1 | tee $HOME/scripts/logs/mysqllogrotate.log;status=`grep 'ALARM' $HOME/scripts/logs/mysqllogrotate.log`;sub="MySQL daily error/slow log rotate HQ2"; [ -z "$status" ] && msubject="OK -"${sub} || msubject="ALARM-"${sub}; echo "Subject: ${msubject}" | cat - $HOME/scripts/logs/mysqllogrotate.log | /usr/sbin/sendmail -f MySQLDBA_HQ2 mysql_dba@businesswire.com
+
+
+#HQ MySQL server half-hour replication status check
+0,10,20,30,40,50 * * * * $HOME/scripts/monitor/dbmonitor.sh Zu0Cr0N!>> $HOME/scripts/logs/dbmonitor.log 2>&1
+* * * * * $HOME/scripts/monitor/processmonitor.sh Zu0Cr0N! >> $HOME/scripts/logs/processmonitor.log_`date +\%d\%m\%y` 2>&1
+
+0 0 * * * $HOME/scripts/utility/GrantNyUsers.sh 2>&1 | tee  $HOME/scripts/logs/NYuserscheckup_today.log ;status=`grep 'ALARM' $HOME/scripts/logs/NYuserscheckup_today.log`;sub="MySQL Replication NY task and Aegir users checkup HQ2"; [ -z "$status" ] && msubject="NO ACTION NEEDED -"${sub} || msubject="USER ADDED -"${sub};echo  "Subject: ${msubject}" | cat - $HOME/scripts/logs/NYuserscheckup_today.log | /usr/sbin/sendmail -f MySQLDBA_HQ2 mysql_dba@businesswire.com; cat $HOME/scripts/logs/NYuserscheckup_today.log >>$HOME/scripts/logs/NYuserscheckup.log && rm $HOME/scripts/logs/NYuserscheckup_today.log
+
+#HQ MySQL PROD monthly slow query reports: runs every first Thurday each month
+#MySQL slow query log report
+0 3 * * 4 $HOME/scripts/performance/queries/mysqlslowreport.sh hq2mysql1.sfprod.businesswire.com 2>&1 | tee $HOME/scripts/logs/mysqlslowreport.log 
+
+#MySQL servers weekly checksum between Master and Slave  ( HQ2MySQL PROD)
+#MySQL Replication Data Integrity Check
+0 3 * * 6 $HOME/scripts/utility/checksum/checktables.sh hq2mysqlprod hq2mysql1.sfprod.businesswire.com hq2mysql2.nyprod.businesswire.com 2>&1 | tee $HOME/scripts/logs/hq2mysqlPRODchecksum.log; status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/hq2mysqlprod_CHECKSUM_RECHECK_result.log;grep 'ERROR' ${HOME}/scripts/logs/hq2mysqlPRODchecksum.log`; [ -z "$status" ] && msubject="OK -Weekly hq2mysqlprod Replication Integrity Check" || msubject="ALARM -Weekly hq2mysqlprod Replication Integrity Check";echo -e "Subject: ${msubject}\n\n $(cat  $HOME/scripts/utility/checksum/result/hq2mysqlprod_CHECKSUM_RECHECK_result.log)" | /usr/sbin/sendmail -f  MySQLDBA_HQ2 mysql_dba@businesswire.com
+
+#MySQL servers weekly checksum between Master and Slave  ( HQ2MySQL QA)
+#MySQL Replication Data Integrity Check
+0 8 * * * /usr/bin/scp -i $HOME/.ssh/mysqldba_hq_dsa mysql@hq2mysql2.sftest.businesswire.com:$HOME/scripts/logs/hq2mysqlQAchecksum.log $HOME/scripts/logs/; /usr/bin/scp -i $HOME/.ssh/mysqldba_hq_dsa mysql@hq2mysql2.sftest.businesswire.com:$HOME/scripts/utility/checksum/result/hq2mysqlqa_* $HOME/scripts/utility/checksum/result/ ;status=`grep 'ALARM' ${HOME}/scripts/utility/checksum/result/hq2mysqlqa_CHECKSUM_RECHECK_result.log;grep 'ERROR' ${HOME}/scripts/logs/hq2mysqlQAchecksum.log`; [ -z "$status" ] && msubject="OK -Weekly hq2mysqlqa Replication Integrity Check" || msubject="ALARM -Weekly hq2mysqlqa Replication Integrity Check";echo -e "Subject: ${msubject}\n\n $(cat  $HOME/scripts/utility/checksum/result/hq2mysqlqa_CHECKSUM_RECHECK_result.log)" | /usr/sbin/sendmail -f  MySQLDBA_HQ2 mysql_dba@businesswire.com

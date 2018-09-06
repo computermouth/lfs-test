@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# All MySQL related scripts should be able to catch ctrl^c 
+trap 'increment' 2
+
+increment()
+{
+  echo "Caught SIGINT ..."
+  echo "Okay, I'll quit ..."
+  exit 1
+}
+
+
+
+if [ -f $HOME/mysql.env ];then
+        . $HOME/mysql.env
+else
+	echo "${HOME}/mysql.env is missing. The script is terminated"
+	exit 1
+fi
+
+#global.env is only available on BWNMySQL and Jcon but not HQ. Loading global.env is for environment variables BW_LIFECYCLE. for HQ, the variable is defined at system level and can be accessed anytime. 
+
+if [ -f /opt/businesswire/config/global.env ];then
+        . /opt/businesswire/config/global.env
+fi
+
+
+#Get clustername:  bwnmysql, hqxmysql, jcon
+hname=`hostname -s`
+if [[ $hname == jcon* ]];then
+	CLUSTERNAME="jcon"
+elif [[ $hname == bwnmysql* ]];then
+	CLUSTERNAME="bwnmysql"
+elif [[ $hname == hq* ]];then
+	CLUSTERNAME=`echo $hname | grep -io "^[a-zA-Z0-9]\+mysql"`
+else	
+	echo "Error: Unrecognized hostname $hname, can't determine the cluster name, script is terminated"
+	exit 1
+fi
+
+#Determine how  many mysql node in each location.  For jcon, just one node, bwnmysql and hq always has two in prod
+secondnode=${CLUSTERNAME}2
+ping -c 1 -t 1 $secondnode > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+	NODE=2
+else
+	NODE=1
+fi
+	
+
+#Setup which datacenters are invloved.  SCNY=0  includes SF and SC  SCNY=1  includes SC and NY
+#SC has been retired, SCNY should always be 1
+SCNY=1
+
+INTERACTIVE=0
+DEBUG=1
+TEST=0
+
+
+YES=1
+NO=0
+WRONGSTATUS=-1
+
+NOTSURE=-1
+UP=1
+DOWN=0
+
+ALERTEMAIL="mysql_dba@businesswire.com"
+
+BACKUP_DIR=/var/mysql/backup
+DATA_DIR=/var/mysql/data
+
+USER="mysql"
+if [[ $CLUSTERNAME == bwn* ]];then
+	ROOT="root"
+else
+	ROOT="bw_dbuser"
+fi
+REPLUSER="repl"
+REPLPW=""
+
+
+#INNODB_LOG_FILES_IN_GROUP and INNODB_DATA_FILE_PATH will need to be read from the DB in the furture
+INNODB_LOG_FILES_IN_GROUP=2
+if [[ $CLUSTERNAME == bwn* ]];then
+	SSH_KEY="${HOME}/.ssh/id_rsa"
+	INNODB_DATA_FILE_PATH='ibdata1:12M:autoextend'
+elif [[ $CLUSTERNAME == jcon* ]]; then
+	SSH_KEY="${HOME}/.ssh/mysqldba_dsa"
+	INNODB_DATA_FILE_PATH='ibdata1:12M:autoextend'
+elif [[ $CLUSTERNAME == hq* ]]; then
+	SSH_KEY="${HOME}/.ssh/mysqldba_hq_dsa"
+	INNODB_DATA_FILE_PATH='ibdata1:12M:autoextend'
+fi
+
+SSH_CMD=`which ssh`
+if  [ -z "$SSH_KEY" ];then
+	SSH="${SSH_CMD}"
+else
+	SSH="${SSH_CMD} -i ${SSH_KEY}"
+fi
+
+GREEN="\033[1;32m"
+RED="\033[1;4;31m"
+NORMAL="\033[0m"
+
+OK=1
+FAILED=0
+
+DATENUM=`date +%Y%m%d-%H%M`
+DATEDIR=`date +%Y%m%d%H%M`
+#DATEDIR="201501161441"
+#DATENUM="2015011614-41"
+MYSQL_LOG_FILE="/var/mysql/logs/error_log.err"
+
+#File MySQL.conf.local is optional. the purpose of this file is to setup a new values to a variable in MySQL.conf without new deploy from Puppet since MySQL.conf is controlled by Puppet but MySQL.conf.local is not.
+
+if [ -f ${SCRIPT_PATH}/switchoverGTID/inc/MySQL.conf.local ];then
+	#echo "Found local configuration file ${SCRIPT_PATH}/switchoverGTID/inc/MySQL.conf.local. The variables in this file will overwrite the content in MySQL.conf"
+	echo "Loading ${SCRIPT_PATH}/switchoverGTID/inc/MySQL.conf.local..."
+        . ${SCRIPT_PATH}/switchoverGTID/inc/MySQL.conf.local 
+	echo "Complete"
+fi
+
+BACKUP_DIR_TEMP="/var/mysql/backup/${DATEDIR}"

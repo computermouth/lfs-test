@@ -1,0 +1,28 @@
+MAILTO=min.chen@businesswire.com
+PATH=/sbin:/usr/bin:/bin:/usr/sbin
+SHELL=/bin/bash
+
+#DONT ENABLE : HQ MySQL Drupal nightly full backup to DB server local hard disks moved to PROD
+#10 0 * * * $HOME/scripts/backup/alldata_backup.sh> $HOME/scripts/logs/dailybackup_drupal_today.log 2>&1;echo -e "Subject: Log file for Drupal backup\n\n $(cat $HOME/scripts/logs/dailybackup_drupal_today.log)" | /usr/sbin/sendmail -f MySQLDBA_HQ mysql_dba@businesswire.com; cat $HOME/scripts/logs/dailybackup_drupal_today.log >>$HOME/scripts/logs/dailybackup_drupal.log && rm $HOME/scripts/logs/dailybackup_drupal_today.log
+
+#DONT ENABLE : HQ MySQL weekly binary log purge  moved to PROD
+#10 13 * * * $HOME/scripts/purge/PurgeAll.sh Zu0Cr0N! 2>&1 > $HOME/scripts/logs/PurgeAll.log| /usr/sbin/sendmail -f MySQLDBA_HQ mysql_dba@businesswire.com
+
+#DONT ENABLE : HQ MySQL servers daily slow query log and error log rotation: moved to PROD
+#MySQL slow query log and error log rotation
+#5 0 * * * $HOME/scripts/performance/queries/mysqllogrotate.sh 2>&1 | tee $HOME/scripts/logs/mysqllogrotate.log
+
+
+
+#DONT ENABLE : HQ MySQL server half-hour replication status check : moved to PROD
+#0,30 * * * * $HOME/scripts/monitor/dbmonitor.sh Zu0Cr0N!>> $HOME/scripts/logs/dbmonitor.log 2>&1
+
+#HQ MySQL PROD monthly slow query reports: runs every first Thurday each month
+#MySQL slow query log report
+0 3 * * 4 $HOME/scripts/performance/queries/mysqlslowreport.sh hq2mysql1.sftest.businesswire.com> $HOME/scripts/logs/mysqlslowreport.log 2>&1
+
+
+#MySQL servers weekly checksum between Master and Slave  ( HQ2MySQL QA; result will be scp to PROD for email)
+#MySQL Replication Data Integrity Check
+0 1 * * * $HOME/scripts/utility/checksum/checktables.sh hq2mysqlqa hq2mysql1.sftest.businesswire.com hq2mysql2.sftest.businesswire.com 2>&1 | tee  $HOME/scripts/logs/hq2mysqlQAchecksum.log
+

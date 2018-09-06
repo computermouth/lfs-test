@@ -1,0 +1,1448 @@
+#!/usr/bin/env bash
+
+# This program is part of Percona Toolkit: http://www.percona.com/software/
+# See "COPYRIGHT, LICENSE, AND WARRANTY" at the end of this file for legal
+# notices and disclaimers.
+
+usage() {
+   if [ "${OPT_ERR}" ]; then
+      echo "${OPT_ERR}" >&2
+   fi
+   echo "Usage: pt-mysql-summary [MYSQL-OPTIONS]" >&2
+   echo "For more information, 'man pt-mysql-summary' or 'perldoc $0'" >&2
+   exit 1
+}
+
+# ########################################################################
+# Some global setup is necessary for cross-platform compatibility, even
+# when sourcing this script for testing purposes.
+# ########################################################################
+AP_AWK="$(which awk)"
+which gawk >/dev/null 2>&1 && AP_AWK="$(which gawk)"
+AP_SED="$(which sed)"
+which gsed >/dev/null 2>&1 && AP_SED="$(which gsed)"
+AP_GREP="$(which grep)"
+which ggrep >/dev/null 2>&1 && AP_GREP="$(which ggrep)"
+
+# ########################################################################
+# Globals, helper functions
+# ########################################################################
+
+# The awk code for fuzzy rounding.  (It's used in a few places, so makes sense
+# not to duplicate).  It fuzzy-rounds the variable named fuzzy_var.  It goes in
+# steps of 5, 10, 25, then repeats by a factor of 10 larger (50, 100, 250), and
+# so on, until it finds a number that's large enough.  The pattern is slightly
+# broken between the initial 1 and 50, because rounding to the nearest 2.5
+# doesn't seem right to me.
+fuzzy_formula='
+   rounded = 0;
+   if (fuzzy_var <= 10 ) {
+      rounded   = 1;
+   }
+   factor = 1;
+   while ( rounded == 0 ) {
+      if ( fuzzy_var <= 50 * factor ) {
+         fuzzy_var = sprintf("%.0f", fuzzy_var / (5 * factor)) * 5 * factor;
+         rounded   = 1;
+      }
+      else if ( fuzzy_var <= 100  * factor) {
+         fuzzy_var = sprintf("%.0f", fuzzy_var / (10 * factor)) * 10 * factor;
+         rounded   = 1;
+      }
+      else if ( fuzzy_var <= 250  * factor) {
+         fuzzy_var = sprintf("%.0f", fuzzy_var / (25 * factor)) * 25 * factor;
+         rounded   = 1;
+      }
+      factor = factor * 10;
+   }'
+
+# The temp files are for storing working results so we don't call commands many
+# times (gives inconsistent results, maybe adds load on things I don't want to
+# such as RAID controllers).  They must not exist -- if they did, someone would
+# symlink them to /etc/passwd and then run this program as root.  Call this
+# function with "rm" or "touch" as an argument.
+temp_files() {
+   for file in /tmp/percona-toolkit{,-mysql-variables,-mysql-status,-innodb-status} \
+         /tmp/percona-toolkit{2,-mysql-databases,-mysql-processlist,-noncounters} \
+         /tmp/percona-toolkit-mysql{dump,-slave};
+   do
+      case "$1" in
+      touch)
+         if ! touch "${file}"; then
+            echo "I can't make my temp file ${file}";
+            exit 1;
+         fi
+         ;;
+      rm)
+         rm -f "${file}"
+         ;;
+      esac
+   done
+}
+
+# Print a space-padded string into $line.  Then translate spaces to hashes, and
+# underscores to spaces.  End result is a line of hashes with words at the
+# start.
+section () {
+   line="$(printf '#_%-60s' "$1_")"
+   line="${line// /#}"
+   printf "%s\n" "${line//_/ }"
+}
+
+# Print a "name | value" line.
+name_val() {
+   printf "%20s | %s\n" "$1" "$2"
+}
+
+# Converts a value to units of power of 2.  Optional precision is $2.
+shorten() {
+   unit=k
+   size=1024
+   if [ $1 -ge 1099511627776 ] ; then
+      size=1099511627776
+      unit=T
+   elif [ $1 -ge 1073741824 ] ; then
+      size=1073741824
+      unit=G
+   elif [ $1 -ge 1048576 ] ; then
+      size=1048576
+      unit=M
+   fi
+   result=$(echo "$1 $size ${2:-0}" | $AP_AWK '{printf "%." $3 "f", $1 / $2}')
+   echo "${result}${unit}"
+}
+
+# Collapse a file into an aggregated list; file must be created with 'sort |
+# uniq -c'.  This function is copy-pasted from 'summary' so see there for full
+# docs and tests.
+# ##############################################################################
+group_concat () {
+   sed -e '{H; $!d}' -e 'x' -e 's/\n[[:space:]]*\([[:digit:]]*\)[[:space:]]*/, \1x/g' -e 's/[[:space:]][[:space:]]*/ /g' -e 's/, //' ${1}
+}
+
+# Accepts a number of seconds, and outputs a d+h:m:s formatted string
+secs_to_time () {
+   echo "$1" | $AP_AWK '{
+      printf( "%d+%02d:%02d:%02d", $1 / 86400, ($1 % 86400) / 3600, ($1 % 3600) / 60, $1 % 60);
+   }'
+}
+
+# gets a value from /tmp/percona-toolkit-mysql-variables.  Returns zero if it doesn't
+# exist.
+get_var () {
+   v="$($AP_AWK "\$1 ~ /^$1$/ { print \$2 }" /tmp/percona-toolkit-mysql-variables)"
+   echo "${v:-0}"
+}
+
+# Returns true if a variable exists
+var_exists () {
+   $AP_GREP "$1" /tmp/percona-toolkit-mysql-variables >/dev/null 2>&1;
+}
+
+# Returns "Enabled", "Disabled", or "Not Supported" depending on whether the
+# variable exists and is ON or enabled.  You can pass 2nd and 3rd variables to
+# control whether the variable should be 'gt' (numeric greater than) or 'eq'
+# (string equal) to some value.
+feat_on() {
+   if var_exists $1 ; then
+      var="$($AP_AWK "\$1 ~ /^$1$/ { print \$2 }" /tmp/percona-toolkit-mysql-variables)"
+      if [ "${var}" = "ON" ]; then
+         echo "Enabled"
+      elif [ "${var}" = "OFF" -o "${var}" = "0" -o -z "${var}" ]; then
+         echo "Disabled"
+      elif [ "$2" = "ne" ]; then
+         if [ "${var}" != "$3" ]; then
+            echo "Enabled"
+         else
+            echo "Disabled"
+         fi
+      elif [ "$2" = "gt" ]; then
+         if [ "${var}" -gt "$3" ]; then
+            echo "Enabled"
+         else
+            echo "Disabled"
+         fi
+      elif [ "${var}" ]; then
+         echo "Enabled"
+      else
+         echo "Disabled"
+      fi
+   else
+      echo "Not Supported"
+   fi
+}
+
+# gets a value from /tmp/percona-toolkit-mysql-status.  Returns zero if it doesn't
+# exist.
+get_stat () {
+   v="$($AP_AWK "\$1 ~ /^$1$/ { print \$2 }" /tmp/percona-toolkit-mysql-status)"
+   echo "${v:-0}"
+}
+
+# Does fuzzy rounding: rounds to nearest interval, but the interval gets larger
+# as the number gets larger.  This is to make things easier to diff.
+fuzz () {
+   echo $1 | $AP_AWK "{fuzzy_var=\$1; ${fuzzy_formula} print fuzzy_var;}"
+}
+
+# Fuzzy computes the percent that $1 is of $2
+fuzzy_pct () {
+   pct=$(echo $1 $2 | $AP_AWK '{ if ($2 > 0) { printf "%d", $1/$2*100; } else {print 0} }');
+   echo "$(fuzz ${pct})%"
+}
+
+# ##############################################################################
+# Functions for parsing specific files and getting desired info from them.
+# These are called from within main() and are separated so they can be tested
+# easily.  The calling convention is that the data they need to run is prepared
+# first by putting it into /tmp/percona-toolkit.  Then code that's testing just needs to
+# put sample data into /tmp/percona-toolkit and call it.
+# ##############################################################################
+
+# Parses the output of 'ps -e -o args | $AP_GREP mysqld' or 'ps auxww...'
+# which should be in /tmp/percona-toolkit.
+parse_mysqld_instances () {
+   local file=$1
+   echo "  Port  Data Directory             Socket"
+   echo "  ===== ========================== ======"
+   $AP_GREP '/mysqld ' $file | while read line; do
+      for word in ${line}; do
+         # Some grep doesn't have -o, so I have to pull out the words I want by
+         # looking at each word
+         if echo "${word}" | $AP_GREP -- "--socket=" > /dev/null; then
+            socket="$(echo "${word}" | cut -d= -f2)"
+         fi
+         if echo "${word}" | $AP_GREP -- "--port=" > /dev/null; then
+            port="$(echo "${word}" | cut -d= -f2)"
+         fi
+         if echo "${word}" | $AP_GREP -- "--datadir=" > /dev/null; then
+            datadir="$(echo "${word}" | cut -d= -f2)"
+         fi
+      done
+      printf "  %5s %-26s %s\n" "${port}" "${datadir}" "${socket}"
+   done
+}
+
+# Tries to find the my.cnf file by examining 'ps' output, which should be in
+# /tmp/percona-toolkit.  You have to specify the port for the instance you are
+# interested in, in case there are multiple instances.
+find_my_cnf_file() {
+   local file=$1
+   local port=$2
+   if test -n "$port" && $AP_GREP -- "/mysqld.*--port=$port" $file >/dev/null 2>&1 ; then
+      $AP_GREP -- "/mysqld.*--port=$port" $file \
+         | $AP_AWK 'BEGIN{RS=" "; FS="=";} $1 ~ /--defaults-file/ { print $2; }' \
+         | head -n1
+   else
+      $AP_GREP '/mysqld' $file \
+         | $AP_AWK 'BEGIN{RS=" "; FS="=";} $1 ~ /--defaults-file/ { print $2; }' \
+         | head -n1
+   fi
+}
+
+# Gets the MySQL system time.  Uses input from /tmp/percona-toolkit-mysql-variables.
+get_mysql_timezone () {
+   tz="$(get_var time_zone)"
+   if [ "${tz}" = "SYSTEM" ]; then
+      tz="$(get_var system_time_zone)"
+   fi
+   echo "${tz}"
+}
+
+# Gets the MySQL system version.  Uses input from /tmp/percona-toolkit-mysql-variables.
+get_mysql_version () {
+   name_val Version "$(get_var version) $(get_var version_comment)"
+   name_val "Built On" "$(get_var version_compile_os) $(get_var version_compile_machine)"
+}
+
+# Gets the system start and uptime in human readable format.  Last restart date
+# should be in /tmp/percona-toolkit.
+get_mysql_uptime () {
+   local file=$1
+   restart="$(cat $file)"
+   uptime="$(get_stat Uptime)"
+   uptime="$(secs_to_time ${uptime})"
+   echo "${restart} (up ${uptime})"
+}
+
+# Summarizes the output of SHOW MASTER LOGS, which is in /tmp/percona-toolkit
+summarize_binlogs () {
+   local file=$1
+   name_val "Binlogs" $(wc -l $file)
+   name_val "Zero-Sized" $($AP_GREP -c '\<0$' $file)
+   size=$($AP_AWK '{t += $2} END{printf "%0.f\n", t}' $file)
+   name_val "Total Size" $(shorten ${size} 1)
+}
+
+# Print out binlog_do_db and binlog_ignore_db
+format_binlog_filters () {
+   local file=$1
+   name_val "binlog_do_db" $(cut -f3 $file)
+   name_val "binlog_ignore_db" $(cut -f4 $file)
+}
+
+# Takes as input a file that has two samples of SHOW STATUS, columnized next to
+# each other.  These should be in /tmp/percona-toolkit.  Outputs fuzzy-ed numbers:
+# absolute, all-time per second, and per-second over the interval between the
+# samples.  Omits any rows that are all zeroes.
+format_status_variables () {
+   local file=$1
+   # First, figure out the intervals.
+   utime1=$($AP_AWK '/Uptime /{print $2}' $file);
+   utime2=$($AP_AWK '/Uptime /{print $3}' $file);
+   ${AP_AWK} "
+   BEGIN {
+      utime1 = ${utime1};
+      utime2 = ${utime2};
+      udays  = utime1 / 86400;
+      udiff  = utime2 - utime1;
+      format=\"%-35s %11s %11s %11s\\n\";
+      printf(format, \"Variable\", \"Per day\", \"Per second\", udiff \" secs\");
+   }
+   \$2 ~ /^[0-9]*\$/ {
+      if ( \$2 > 0 && \$2 < 18446744073709551615 ) {
+         if ( udays > 0 ) {
+            fuzzy_var=\$2 / udays;
+            ${fuzzy_formula};
+            perday=fuzzy_var;
+         }
+         if ( utime1 > 0 ) {
+            fuzzy_var=\$2 / utime1;
+            ${fuzzy_formula};
+            persec=fuzzy_var;
+         }
+         if ( udiff > 0 ) {
+            fuzzy_var=(\$3 - \$2) / udiff;
+            ${fuzzy_formula};
+            nowsec=fuzzy_var;
+         }
+         perday = int(perday);
+         persec = int(persec);
+         nowsec = int(nowsec);
+         if ( perday + persec + nowsec > 0 ) {
+            if ( perday == 0 ) { perday = \"\"; }
+            if ( persec == 0 ) { persec = \"\"; }
+            if ( nowsec == 0 ) { nowsec = \"\"; }
+            printf(format, \$1, perday, persec, nowsec);
+         }
+      }
+   }" $file
+}
+
+# Slices the processlist a bunch of different ways.  The processlist should be
+# created with the \G flag so it's vertical.
+# The parsing is a bit awkward because different
+# versions of awk have limitations like "too many fields on line xyz".  So we
+# use 'cut' to shorten the lines.  We count all things into temporary variables
+# for each process in the processlist, and when we hit the Info: line which
+# ought to be the last line in the process, we decide what to do with the temp
+# variables.  If we're summarizing Command, we count everything; otherwise, only
+# non-Sleep processes get counted towards the sum and max of Time.
+summarize_processlist () {
+   local file=$1
+   for param in Command User Host db State; do
+      echo
+      printf '  %-30s %8s %7s %9s %9s\n' \
+         "${param}" "COUNT(*)" Working "SUM(Time)" "MAX(Time)"
+      echo "  ------------------------------" \
+         "-------- ------- --------- ---------"
+      cut -c1-80 $file \
+         | $AP_AWK "
+         \$1 == \"${param}:\" {
+            p = substr(\$0, index(\$0, \":\") + 2);
+            if ( index(p, \":\") > 0 ) {
+               p = substr(p, 1, index(p, \":\") - 1);
+            }
+            if ( length(p) > 30 ) {
+               p = substr(p, 1, 30);
+            }
+         }
+         \$1 == \"Time:\" {
+            t = \$2;
+         }
+         \$1 == \"Command:\" {
+            c = \$2;
+         }
+         \$1 == \"Info:\" {
+            count[p]++;
+            if ( c == \"Sleep\" ) {
+               sleep[p]++;
+            }
+            if ( \"${param}\" == \"Command\" || c != \"Sleep\" ) {
+               time[p] += t;
+               if ( t > mtime[p] ) { mtime[p] = t; }
+            }
+         }
+         END {
+            for ( p in count ) {
+               fuzzy_var=count[p]-sleep[p]; ${fuzzy_formula} fuzzy_work=fuzzy_var;
+               fuzzy_var=count[p];          ${fuzzy_formula} fuzzy_count=fuzzy_var;
+               fuzzy_var=time[p];           ${fuzzy_formula} fuzzy_time=fuzzy_var;
+               fuzzy_var=mtime[p];          ${fuzzy_formula} fuzzy_mtime=fuzzy_var;
+               printf \"  %-30s %8d %7d %9d %9d\n\", p, fuzzy_count, fuzzy_work, fuzzy_time, fuzzy_mtime;
+            }
+         }
+      " | sort
+   done
+   echo
+}
+
+# Pretty-prints the my.cnf file, which should be in /tmp/percona-toolkit.  It's super
+# annoying, but some *modern* versions of awk don't support POSIX character
+# sets in regular expressions, like [[:space:]] (looking at you, Debian).  So
+# the below patterns contain [<space><tab>] and must remain that way.
+pretty_print_cnf_file () {
+   local file=$1
+   $AP_AWK '
+   BEGIN {
+      FS="="
+   }
+   /^ *[a-zA-Z[]/ {
+      if ($2) {
+         gsub(/^[ 	]*/, "", $1);
+         gsub(/^[ 	]*/, "", $2);
+         gsub(/[ 	]*$/, "", $1);
+         gsub(/[ 	]*$/, "", $2);
+         printf("%-35s = %s\n", $1, $2);
+      }
+      else if ( $0 ~ /\[/ ) {
+         print "";
+         print $1;
+      }
+      else {
+         print $1;
+      }
+   }' $file
+}
+
+find_checkpoint_age() {
+   $AP_AWK '
+   /Log sequence number/{
+      if ( $5 ) {
+         lsn = $5 + ($4 * 4294967296);
+      }
+      else {
+         lsn = $4;
+      }
+   }
+   /Last checkpoint at/{
+      if ( $5 ) {
+         print lsn - ($5 + ($4 * 4294967296));
+      }
+      else {
+         print lsn - $4;
+      }
+   }
+   ' "$@"
+}
+
+find_pending_io_reads() {
+   $AP_AWK '
+   /Pending normal aio reads/ {
+      normal_aio_reads  = substr($5, 1, index($5, ","));
+   }
+   /ibuf aio reads/ {
+      ibuf_aio_reads = substr($4, 1, index($4, ","));
+   }
+   /pending preads/ {
+      preads = $1;
+   }
+   /Pending reads/ {
+      reads = $3;
+   }
+   END {
+      printf "%d buf pool reads, %d normal AIO", reads, normal_aio_reads;
+      printf ", %d ibuf AIO, %d preads", ibuf_aio_reads, preads;
+   }
+   ' "${1}"
+}
+
+find_pending_io_writes() {
+   $AP_AWK '
+   /aio writes/ {
+      aio_writes = substr($NF, 1, index($NF, ","));
+   }
+   /ibuf aio reads/ {
+      log_ios = substr($7, 1, index($7, ","));
+      sync_ios = substr($10, 1, index($10, ","));
+   }
+   /pending log writes/ {
+      log_writes = $1;
+      chkp_writes = $5;
+   }
+   /pending pwrites/ {
+      pwrites = $4;
+   }
+   /Pending writes:/ {
+      lru = substr($4, 1, index($4, ","));
+      flush_list = substr($7, 1, index($7, ","));
+      single_page = $NF;
+   }
+   END {
+      printf "%d buf pool (%d LRU, %d flush list, %d page); %d AIO, %d sync, %d log IO (%d log, %d chkp); %d pwrites", lru + flush_list + single_page, lru, flush_list, single_page, aio_writes, sync_ios, log_ios, log_writes, chkp_writes, pwrites;
+   }
+   ' "${1}"
+}
+
+find_pending_io_flushes() {
+   $AP_AWK '
+   /Pending flushes/ {
+      log_flushes = substr($5, 1, index($5, ";"));
+      buf_pool = $NF;
+   }
+   END {
+      printf "%d buf pool, %d log", buf_pool, log_flushes;
+   }
+   ' "${1}"
+}
+
+summarize_undo_log_entries() {
+   $AP_GREP 'undo log entries' "$1" \
+      | $AP_SED -e 's/^.*undo log entries \([0-9]*\)/\1/' \
+      | $AP_AWK '
+      {
+         count++;
+         sum += $1;
+         if ( $1 > max ) {
+            max = $1;
+         }
+      }
+      END {
+         printf "%d transactions, %d total undo, %d max undo\n", count, sum, max;
+      }'
+}
+
+find_max_trx_time() {
+   $AP_AWK '
+   BEGIN {
+      max = 0;
+   }
+   /^---TRANSACTION.* sec,/ {
+      for ( i = 0; i < 7; ++i ) {
+         if ( $i == "sec," ) {
+            j = i-1;
+            if ( max < $j ) {
+               max = $j;
+            }
+         }
+      }
+   }
+   END {
+      print max;
+   }' "$@"
+}
+
+# Summarizes various things about InnoDB status that are not easy to see by eye.
+format_innodb_status () {
+   local file=$1
+   name_val "Checkpoint Age"       $(shorten $(find_checkpoint_age "${file}"))
+   name_val "InnoDB Queue"        "$(awk '/queries inside/{print}' "${file}")"
+   name_val "Oldest Transaction"  "$(find_max_trx_time "${file}") Seconds";
+   name_val "History List Len"     $(awk '/History list length/{print $4}' "${file}")
+   name_val "Read Views"           $(awk '/read views open inside/{print $1}' "${file}")
+   name_val "Undo Log Entries"    "$(summarize_undo_log_entries "${file}")"
+   name_val "Pending I/O Reads"   "$(find_pending_io_reads "${file}")"
+   name_val "Pending I/O Writes"  "$(find_pending_io_writes "${file}")"
+   name_val "Pending I/O Flushes" "$(find_pending_io_flushes "${file}")"
+   $AP_AWK -F, '/^---TRANSACTION/{print $2}' "${file}" \
+      | $AP_SED -e 's/ [0-9]* sec.*//' | sort | uniq -c > /tmp/percona-toolkit2
+   name_val "Transaction States" "$(group_concat /tmp/percona-toolkit2)"
+   if $AP_GREP 'TABLE LOCK table' "${file}" >/dev/null ; then
+      echo "Tables Locked"
+      $AP_AWK '/^TABLE LOCK table/{print $4}' "${file}" \
+         | sort | uniq -c | sort -rn
+   fi
+   if $AP_GREP 'has waited at' "${file}" > /dev/null ; then
+      echo "Semaphore Waits"
+      $AP_GREP 'has waited at' "${file}" | cut -d' ' -f6-8 \
+         | sort | uniq -c | sort -rn
+   fi
+   if $AP_GREP 'reserved it in mode' "${file}" > /dev/null; then
+      echo "Semaphore Holders"
+      $AP_AWK '/has reserved it in mode/{
+         print substr($0, 1 + index($0, "("), index($0, ")") - index($0, "(") - 1);
+      }' "${file}" | sort | uniq -c | sort -rn
+   fi
+   if $AP_GREP -e 'Mutex at' -e 'lock on' "${file}" >/dev/null 2>&1; then
+      echo "Mutexes/Locks Waited For"
+      $AP_GREP -e 'Mutex at' -e 'lock on' "${file}" | $AP_SED -e 's/^[XS]-//' -e 's/,.*$//' \
+         | sort | uniq -c | sort -rn
+   fi
+}
+
+# Summarizes per-database statistics for a bunch of different things: count of
+# tables, views, etc.  $1 is the file name.  $2 is the database name; if none,
+# then there should be multiple databases.
+format_overall_db_stats () {
+   local file=$1
+   echo
+   # We keep counts of everything in an associative array keyed by db name, and
+   # what it is.  The num_dbs counter is to ensure sort order is consistent when
+   # we run the awk commands following this one.
+   $AP_AWK '
+      BEGIN {
+         # In case there is no USE statement in the file.
+         db      = "{chosen}";
+         num_dbs = 0;
+      }
+      /^USE `.*`;$/ {
+         db = substr($2, 2, length($2) - 3);
+         if ( db_seen[db]++ == 0 ) {
+            dbs[num_dbs] = db;
+            num_dbs++;
+         }
+      }
+      /^CREATE TABLE/ {
+         # Handle single-DB dumps, where there is no USE statement.
+         if (num_dbs == 0) {
+            num_dbs     = 1;
+            db_seen[db] = 1;
+            dbs[0]      = db;
+         }
+         counts[db ",tables"]++;
+      }
+      /CREATE ALGORITHM=/ {
+         counts[db ",views"]++;
+      }
+      /03 CREATE.*03 PROCEDURE/ {
+         counts[db ",sps"]++;
+      }
+      /03 CREATE.*03 FUNCTION/ {
+         counts[db ",func"]++;
+      }
+      /03 CREATE.*03 TRIGGER/ {
+         counts[db ",trg"]++;
+      }
+      /FOREIGN KEY/ {
+         counts[db ",fk"]++;
+      }
+      /PARTITION BY/ {
+         counts[db ",partn"]++;
+      }
+      END {
+         mdb = length("Database");
+         for ( i = 0; i < num_dbs; i++ ) {
+            if ( length(dbs[i]) > mdb ) {
+               mdb = length(dbs[i]);
+            }
+         }
+         fmt = "  %-" mdb "s %6s %5s %3s %5s %5s %5s %5s\n";
+         printf fmt, "Database", "Tables", "Views", "SPs", "Trigs", "Funcs", "FKs", "Partn";
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            printf fmt, db, counts[db ",tables"], counts[db ",views"], counts[db ",sps"], counts[db ",trg"], counts[db ",func"], counts[db ",fk"], counts[db ",partn"];
+         }
+      }
+   ' $file > /tmp/percona-toolkit
+   head -n2 /tmp/percona-toolkit
+   tail -n +3 /tmp/percona-toolkit | sort
+
+   echo
+   # Now do the summary of engines per DB
+   $AP_AWK '
+      BEGIN {
+         # In case there is no USE statement in the file.
+         db          = "{chosen}";
+         num_dbs     = 0;
+         num_engines = 0;
+      }
+      /^USE `.*`;$/ {
+         db = substr($2, 2, length($2) - 3);
+         if ( db_seen[db]++ == 0 ) {
+            dbs[num_dbs] = db;
+            num_dbs++;
+         }
+      }
+      /^\) ENGINE=/ {
+         # Handle single-DB dumps, where there is no USE statement.
+         if (num_dbs == 0) {
+            num_dbs     = 1;
+            db_seen[db] = 1;
+            dbs[0]      = db;
+         }
+         engine=substr($2, index($2, "=") + 1);
+         if ( engine_seen[engine]++ == 0 ) {
+            engines[num_engines] = engine;
+            num_engines++;
+         }
+         counts[db "," engine]++;
+      }
+      END {
+         mdb = length("Database");
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            if ( length(db) > mdb ) {
+               mdb = length(db);
+            }
+         }
+         fmt = "  %-" mdb "s"
+         printf fmt, "Database";
+         for ( i=0;i<num_engines;i++ ) {
+            engine = engines[i];
+            fmts[engine] = " %" length(engine) "s";
+            printf fmts[engine], engine;
+         }
+         print "";
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            printf fmt, db;
+            for ( j=0;j<num_engines;j++ ) {
+               engine = engines[j];
+               printf fmts[engine], counts[db "," engine];
+            }
+            print "";
+         }
+      }
+   ' $file > /tmp/percona-toolkit
+   head -n1 /tmp/percona-toolkit
+   tail -n +2 /tmp/percona-toolkit | sort
+
+   echo
+   # Now do the summary of index types per DB. Careful -- index is a reserved
+   # word in awk.
+   $AP_AWK '
+      BEGIN {
+         # In case there is no USE statement in the file.
+         db        = "{chosen}";
+         num_dbs   = 0;
+         num_idxes = 0;
+      }
+      /^USE `.*`;$/ {
+         db = substr($2, 2, length($2) - 3);
+         if ( db_seen[db]++ == 0 ) {
+            dbs[num_dbs] = db;
+            num_dbs++;
+         }
+      }
+      /KEY/ {
+         # Handle single-DB dumps, where there is no USE statement.
+         if (num_dbs == 0) {
+            num_dbs     = 1;
+            db_seen[db] = 1;
+            dbs[0]      = db;
+         }
+         idx="BTREE";
+         if ( $0 ~ /SPATIAL/ ) {
+            idx="SPATIAL";
+         }
+         if ( $0 ~ /FULLTEXT/ ) {
+            idx="FULLTEXT";
+         }
+         if ( $0 ~ /USING RTREE/ ) {
+            idx="RTREE";
+         }
+         if ( $0 ~ /USING HASH/ ) {
+            idx="HASH";
+         }
+         if ( idx_seen[idx]++ == 0 ) {
+            idxes[num_idxes] = idx;
+            num_idxes++;
+         }
+         counts[db "," idx]++;
+      }
+      END {
+         mdb = length("Database");
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            if ( length(db) > mdb ) {
+               mdb = length(db);
+            }
+         }
+         fmt = "  %-" mdb "s"
+         printf fmt, "Database";
+         for ( i=0;i<num_idxes;i++ ) {
+            idx = idxes[i];
+            fmts[idx] = " %" length(idx) "s";
+            printf fmts[idx], idx;
+         }
+         print "";
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            printf fmt, db;
+            for ( j=0;j<num_idxes;j++ ) {
+               idx = idxes[j];
+               printf fmts[idx], counts[db "," idx];
+            }
+            print "";
+         }
+      }
+   ' $file > /tmp/percona-toolkit
+   head -n1 /tmp/percona-toolkit
+   tail -n +2 /tmp/percona-toolkit | sort
+
+   echo
+   # Now do the summary of datatypes per DB
+   $AP_AWK '
+      BEGIN {
+         # In case there is no USE statement in the file.
+         db          = "{chosen}";
+         num_dbs     = 0;
+         num_types = 0;
+      }
+      /^USE `.*`;$/ {
+         db = substr($2, 2, length($2) - 3);
+         if ( db_seen[db]++ == 0 ) {
+            dbs[num_dbs] = db;
+            num_dbs++;
+         }
+      }
+      /^  `/ {
+         # Handle single-DB dumps, where there is no USE statement.
+         if (num_dbs == 0) {
+            num_dbs     = 1;
+            db_seen[db] = 1;
+            dbs[0]      = db;
+         }
+         str = $0;
+         str = substr(str, index(str, "`") + 1);
+         str = substr(str, index(str, "`") + 2);
+         if ( index(str, " ") > 0 ) {
+            str = substr(str, 1, index(str, " ") - 1);
+         }
+         if ( index(str, ",") > 0 ) {
+            str = substr(str, 1, index(str, ",") - 1);
+         }
+         if ( index(str, "(") > 0 ) {
+            str = substr(str, 1, index(str, "(") - 1);
+         }
+         type = str;
+         if ( type_seen[type]++ == 0 ) {
+            types[num_types] = type;
+            num_types++;
+         }
+         counts[db "," type]++;
+      }
+      END {
+         mdb = length("Database");
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            if ( length(db) > mdb ) {
+               mdb = length(db);
+            }
+         }
+         fmt = "  %-" mdb "s"
+         mtlen = 0; # max type length
+         for ( i=0;i<num_types;i++ ) {
+            type = types[i];
+            if ( length(type) > mtlen ) {
+               mtlen = length(type);
+            }
+         }
+         for ( i=1;i<=mtlen;i++ ) {
+            printf "  %-" mdb "s", "";
+            for ( j=0;j<num_types;j++ ) {
+               type = types[j];
+               if ( i > length(type) ) {
+                  ch = " ";
+               }
+               else {
+                  ch = substr(type, i, 1);
+               }
+               printf(" %3s", ch);
+            }
+            print "";
+         }
+         printf "  %-" mdb "s", "Database";
+         for ( i=0;i<num_types;i++ ) {
+            printf " %3s", "===";
+         }
+         print "";
+         for ( i=0;i<num_dbs;i++ ) {
+            db = dbs[i];
+            printf fmt, db;
+            for ( j=0;j<num_types;j++ ) {
+               type = types[j];
+               printf " %3s", counts[db "," type];
+            }
+            print "";
+         }
+      }
+   ' $file > /tmp/percona-toolkit
+   hdr=$($AP_GREP -n Database /tmp/percona-toolkit | cut -d: -f1);
+   head -n${hdr} /tmp/percona-toolkit
+   tail -n +$((${hdr} + 1)) /tmp/percona-toolkit | sort
+   echo
+}
+
+# ##############################################################################
+# The main() function is called at the end of the script.  This makes it
+# testable.  Major bits of parsing are separated into functions for testability.
+# ##############################################################################
+main() {
+
+   # Begin by setting the $PATH to include some common locations that are not
+   # always in the $PATH, including the "sbin" locations.  On SunOS systems,
+   # prefix the path with the location of more sophisticated utilities.
+   export PATH="${PATH}:/usr/local/bin:/usr/bin:/bin:/usr/libexec"
+   export PATH="${PATH}:/usr/mysql/bin/:/usr/local/sbin:/usr/sbin:/sbin"
+   export PATH="/usr/gnu/bin/:/usr/xpg4/bin/:${PATH}"
+
+   # Set up temporary files.
+   temp_files "rm"
+   temp_files "touch"
+
+   # ########################################################################
+   # Header for the whole thing, table of discovered instances
+   # ########################################################################
+   section Percona_Toolkit_MySQL_Summary_Report
+   name_val "System time" "`date -u +'%F %T UTC'` (local TZ: `date +'%Z %z'`)"
+   section Instances
+   ps auxww 2>/dev/null | $AP_GREP mysqld > /tmp/percona-toolkit
+   parse_mysqld_instances /tmp/percona-toolkit
+
+   # ########################################################################
+   # Fetch some basic info so we can start
+   # ########################################################################
+   mysql "$@" -ss -e 'SELECT CURRENT_USER()' > /tmp/percona-toolkit
+   if [ "$?" != "0" ]; then
+      echo "Cannot connect to mysql, please specify command-line options."
+      temp_files "rm"
+      exit 1
+   fi
+   user="$(cat /tmp/percona-toolkit)";
+   mysql "$@" -ss  -e 'SHOW /*!40100 GLOBAL*/ VARIABLES' > /tmp/percona-toolkit-mysql-variables
+   mysql "$@" -ss  -e 'SHOW /*!50000 GLOBAL*/ STATUS' > /tmp/percona-toolkit-mysql-status
+   mysql "$@" -ss  -e 'SHOW DATABASES' > /tmp/percona-toolkit-mysql-databases 2>/dev/null
+   mysql "$@" -ssE -e 'SHOW SLAVE STATUS' > /tmp/percona-toolkit-mysql-slave 2>/dev/null
+   mysql "$@" -ssE -e 'SHOW /*!50000 ENGINE*/ INNODB STATUS' > /tmp/percona-toolkit-innodb-status 2>/dev/null
+   mysql "$@" -ssE -e 'SHOW FULL PROCESSLIST' > /tmp/percona-toolkit-mysql-processlist 2>/dev/null
+   now="$(mysql "$@" -ss -e 'SELECT NOW()')"
+   port="$(get_var port)"
+
+   # ########################################################################
+   # General date, hostname, etc
+   # ########################################################################
+   section "Report_On_Port_${port}"
+   name_val User "${user}"
+   name_val Time "${now} ($(get_mysql_timezone))"
+   name_val Hostname "$(get_var hostname)"
+   get_mysql_version
+
+   uptime="$(get_stat Uptime)"
+   mysql "$@" -ss -e "SELECT LEFT(NOW() - INTERVAL ${uptime} SECOND, 16)" \
+      > /tmp/percona-toolkit
+   name_val Started "$(get_mysql_uptime /tmp/percona-toolkit)"
+
+   name_val Databases "$($AP_GREP -c . /tmp/percona-toolkit-mysql-databases)"
+   name_val Datadir "$(get_var datadir)"
+   procs="$(get_stat Threads_connected)"
+   procr="$(get_stat Threads_running)"
+   name_val Processes "$(fuzz ${procs}) connected, $(fuzz ${procr}) running"
+   if [ -s /tmp/percona-toolkit-mysql-slave ]; then slave=""; else slave="not "; fi
+   slavecount=$($AP_GREP -c 'Binlog Dump' /tmp/percona-toolkit-mysql-processlist)
+   name_val Replication "Is ${slave}a slave, has ${slavecount} slaves connected"
+
+   # TODO move this into a section with other files: error log, slow log and
+   # show the sizes
+   pid_file="$(get_var pid_file)"
+   [ -e "${pid_file}" ] && PID_EXISTS="(exists)"
+   name_val Pidfile "${pid_file} ${PID_EXISTS:-(does not exist)}"
+
+   # ########################################################################
+   # Processlist, sliced several different ways
+   # ########################################################################
+   section Processlist
+   summarize_processlist /tmp/percona-toolkit-mysql-processlist
+
+   # ########################################################################
+   # Queries and query plans
+   # ########################################################################
+   section "Status_Counters_(Wait_10_Seconds)"
+   sleep 10
+   # TODO: gather this data in the same format as normal: stats, TS line
+   mysql "$@" -ss -e 'SHOW /*!50000 GLOBAL*/ STATUS' \
+      | join /tmp/percona-toolkit-mysql-status - > /tmp/percona-toolkit 
+   # Make a file with a list of things we want to omit because they aren't
+   # counters, they are gauges (in RRDTool terminology).  Gauges are shown
+   # elsewhere in the output.
+   for var in Compression Delayed_insert_threads Innodb_buffer_pool_pages_data \
+      Innodb_buffer_pool_pages_dirty Innodb_buffer_pool_pages_free \
+      Innodb_buffer_pool_pages_latched Innodb_buffer_pool_pages_misc \
+      Innodb_buffer_pool_pages_total Innodb_data_pending_fsyncs \
+      Innodb_data_pending_reads Innodb_data_pending_writes \
+      Innodb_os_log_pending_fsyncs Innodb_os_log_pending_writes \
+      Innodb_page_size Innodb_row_lock_current_waits Innodb_row_lock_time_avg \
+      Innodb_row_lock_time_max Key_blocks_not_flushed Key_blocks_unused \
+      Key_blocks_used Last_query_cost Max_used_connections Ndb_cluster_node_id \
+      Ndb_config_from_host Ndb_config_from_port Ndb_number_of_data_nodes \
+      Not_flushed_delayed_rows Open_files Open_streams Open_tables \
+      Prepared_stmt_count Qcache_free_blocks Qcache_free_memory \
+      Qcache_queries_in_cache Qcache_total_blocks Rpl_status \
+      Slave_open_temp_tables Slave_running Ssl_cipher Ssl_cipher_list \
+      Ssl_ctx_verify_depth Ssl_ctx_verify_mode Ssl_default_timeout \
+      Ssl_session_cache_mode Ssl_session_cache_size Ssl_verify_depth \
+      Ssl_verify_mode Ssl_version Tc_log_max_pages_used Tc_log_page_size \
+      Threads_cached Threads_connected Threads_running \
+      Uptime_since_flush_status;
+   do
+      echo "${var}" >> /tmp/percona-toolkit-noncounters
+   done
+   format_status_variables /tmp/percona-toolkit | $AP_GREP -v -f /tmp/percona-toolkit-noncounters
+
+   # ########################################################################
+   # Table cache
+   # ########################################################################
+   section Table_cache
+   if var_exists table_open_cache; then
+      table_cache=$(get_var table_open_cache)
+   else
+      table_cache=$(get_var table_cache)
+   fi
+   name_val Size "${table_cache}"
+   open_tables=$(get_stat Open_tables)
+   name_val Usage  "$(fuzzy_pct ${open_tables} ${table_cache})"
+
+   # ########################################################################
+   # Percona Server features
+   # ########################################################################
+   section Key_Percona_Server_features
+   name_val "Table & Index Stats"  "$(feat_on userstat_running)"
+   name_val "Multiple I/O Threads" "$(feat_on innodb_read_io_threads gt 1)"
+   name_val "Corruption Resilient" "$(feat_on innodb_pass_corrupt_table)"
+   name_val "Durable Replication"  "$(feat_on innodb_overwrite_relay_log_info)"
+   name_val "Import InnoDB Tables" "$(feat_on innodb_expand_import)"
+   name_val "Fast Server Restarts" "$(feat_on innodb_auto_lru_dump)"
+   name_val "Enhanced Logging"     "$(feat_on log_slow_verbosity ne microtime)"
+   name_val "Replica Perf Logging" "$(feat_on log_slow_slave_statements)"
+   name_val "Response Time Hist."  "$(feat_on enable_query_response_time_stats)"
+   name_val "Smooth Flushing"      "$(feat_on innodb_adaptive_checkpoint ne none)"
+   name_val "HandlerSocket NoSQL"  "$(feat_on handlersocket_port)"
+   mysql "$@" -e 'SELECT FNV_64("a")' >/dev/null 2>&1 && FNV_64="Enabled";
+   name_val "Fast Maatkit Hashes"  "${FNV_64:-Unknown}"
+
+   # ########################################################################
+   # Query cache
+   # ########################################################################
+   query_cache_size=$(get_var query_cache_size);
+   if [ "$(get_var have_query_cache)" ]; then
+      section Query_cache
+      name_val query_cache_type $(get_var query_cache_type)
+      name_val Size "$(shorten ${query_cache_size} 1)"
+      used=$(( ${query_cache_size} - $(get_stat Qcache_free_memory) ))
+      name_val Usage "$(fuzzy_pct ${used} ${query_cache_size})"
+      hrat=$(fuzzy_pct $(get_stat Qcache_hits) $(get_stat Qcache_inserts))
+      name_val HitToInsertRatio "${hrat}"
+   fi
+
+   # ########################################################################
+   # Schema, databases, data type, other analysis.
+   # ########################################################################
+   section Schema
+   # Assume "no" if stdin or stdout is not a terminal, so this can be run and
+   # put into a file, or piped into a pager, or something else like that.
+   if [ -t 0 -a -t 1 ]; then
+      echo -n "Would you like to mysqldump -d the schema and analyze it? y/n "
+      read reply
+      reply=${reply:-n}
+   fi
+   if echo "${reply:-n}" | $AP_GREP -i '^y' > /dev/null ; then
+      # If mysqldump supports triggers, then add options for routines.
+      if mysqldump --help --verbose 2>&1 | $AP_GREP triggers >/dev/null; then
+         trg_arg="--routines"
+      fi
+      if [ "${trg_arg}" ]; then
+         # Find out if there are any triggers.  If there are none, we will skip
+         # that option to mysqldump, because when mysqldump checks for them, it
+         # can take a long time, one table at a time.
+         triggers="--skip-triggers"
+         trg=$(mysql "$@" -ss -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TRIGGERS" 2>/dev/null);
+         if [ "${res}" ]; then
+            if [ "${res}" -gt 0 ]; then
+               triggers="--triggers"
+            fi
+         fi
+         trg_arg="${trg_arg} ${triggers}";
+      fi
+      # Find out which databases to dump
+      num_dbs="$($AP_GREP -c . /tmp/percona-toolkit-mysql-databases)"
+      echo "There are ${num_dbs} databases.  Would you like to dump all, or just one?"
+      echo -n "Type the name of the database, or press Enter to dump all of them. "
+      read dbtodump
+      mysqldump "$@" --no-data --skip-comments \
+         --skip-add-locks --skip-add-drop-table --compact \
+         --skip-lock-all-tables --skip-lock-tables --skip-set-charset \
+         ${trg_arg} ${dbtodump:---all-databases} > /tmp/percona-toolkit-mysqldump
+      # Test the result by checking the file, not by the exit status, because we
+      # might get partway through and then die, and the info is worth analyzing
+      # anyway.
+      if $AP_GREP 'CREATE TABLE' /tmp/percona-toolkit-mysqldump >/dev/null 2>&1; then
+         format_overall_db_stats /tmp/percona-toolkit-mysqldump
+      else
+         echo "Skipping schema analysis due to apparent error in dump file"
+         rm -f /tmp/percona-toolkit-mysqldump
+      fi
+   else
+      echo "Skipping schema analysis"
+   fi
+
+   # ########################################################################
+   # Noteworthy Technologies
+   # ########################################################################
+   section Noteworthy_Technologies
+   if [ -e /tmp/percona-toolkit-mysqldump ]; then
+      if $AP_GREP FULLTEXT /tmp/percona-toolkit-mysqldump > /dev/null; then
+         name_val "Full Text Indexing" Yes
+      else
+         name_val "Full Text Indexing" No
+      fi
+      if $AP_GREP 'GEOMETRY\|POINT\|LINESTRING\|POLYGON' /tmp/percona-toolkit-mysqldump > /dev/null; then
+         name_val "Geospatial Types" Yes
+      else
+         name_val "Geospatial Types" No
+      fi
+      if $AP_GREP 'FOREIGN KEY' /tmp/percona-toolkit-mysqldump > /dev/null; then
+         name_val "Foreign Keys" Yes
+      else
+         name_val "Foreign Keys" No
+      fi
+      if $AP_GREP 'PARTITION BY' /tmp/percona-toolkit-mysqldump > /dev/null; then
+         name_val "Partitioning" Yes
+      else
+         name_val "Partitioning" No
+      fi
+   fi
+   if [ "$(get_stat Ssl_accepts)" -gt 0 ]; then
+      name_val "SSL" Yes
+   else
+      name_val "SSL" No
+   fi
+   if [ "$(get_stat Com_lock_tables)" -gt 0 ]; then
+      name_val "Explicit LOCK TABLES" Yes
+   else
+      name_val "Explicit LOCK TABLES" No
+   fi
+   if [ "$(get_stat Delayed_writes)" -gt 0 ]; then
+      name_val "Delayed Insert" Yes
+   else
+      name_val "Delayed Insert" No
+   fi
+   if [ "$(get_stat Com_xa_start)" -gt 0 ]; then
+      name_val "XA Transactions" Yes
+   else
+      name_val "XA Transactions" No
+   fi
+   if [ "$(get_stat Ndb_cluster_node_id)" -gt 0 ]; then
+      name_val "NDB Cluster" Yes
+   else
+      name_val "NDB Cluster" No
+   fi
+   prep=$(( $(get_stat Com_stmt_prepare) + $(get_stat Com_prepare_sql) ))
+   if [ "${prep}" -gt 0 ]; then
+      name_val "Prepared Statements" Yes
+   else
+      name_val "Prepared Statements" No
+   fi
+
+   # ########################################################################
+   # InnoDB
+   # ########################################################################
+   section InnoDB
+   have_innodb=$(get_var have_innodb)
+   if [ "${have_innodb}" = "YES" ]; then
+
+      version=$(get_var innodb_version)
+      name_val Version ${version:-default}
+
+      bp_size="$(get_var innodb_buffer_pool_size)"
+      name_val "Buffer Pool Size" "$(shorten ${bp_size} 1)"
+
+      bp_pags="$(get_stat Innodb_buffer_pool_pages_total)"
+      bp_free="$(get_stat Innodb_buffer_pool_pages_free)"
+      bp_dirt="$(get_stat Innodb_buffer_pool_pages_dirty)"
+      bp_fill=$((${bp_pags} - ${bp_free}))
+      name_val "Buffer Pool Fill"   "$(fuzzy_pct ${bp_fill} ${bp_pags})"
+      name_val "Buffer Pool Dirty"  "$(fuzzy_pct ${bp_dirt} ${bp_pags})"
+
+      name_val "File Per Table"      $(get_var innodb_file_per_table)
+      name_val "Page Size"           $(shorten $(get_stat Innodb_page_size))
+
+      lg_size="$(get_var innodb_log_file_size)"
+      lg_fils="$(get_var innodb_log_files_in_group)"
+      lg_totl="$((${lg_size} * ${lg_fils}))"
+      name_val "Log File Size" "${lg_fils} * $(shorten ${lg_size}) = $(shorten ${lg_totl} 1)"
+      name_val "Log Buffer Size"     $(shorten $(get_var innodb_log_buffer_size))
+      name_val "Flush Method"        $(get_var innodb_flush_method)
+      name_val "Flush Log At Commit" $(get_var innodb_flush_log_at_trx_commit)
+      name_val "XA Support"          $(get_var innodb_support_xa)
+      name_val "Checksums"           $(get_var innodb_checksums)
+      name_val "Doublewrite"         $(get_var innodb_doublewrite)
+      name_val "R/W I/O Threads"     "$(get_var innodb_read_io_threads) $(get_var innodb_write_io_threads)"
+      name_val "I/O Capacity"        $(get_var innodb_io_capacity)
+      name_val "Thread Concurrency"  $(get_var innodb_thread_concurrency)
+      name_val "Concurrency Tickets" $(get_var innodb_concurrency_tickets)
+      name_val "Commit Concurrency"  $(get_var innodb_commit_concurrency)
+      name_val "Txn Isolation Level" $(get_var tx_isolation)
+      name_val "Adaptive Flushing"   $(get_var innodb_adaptive_flushing)
+      name_val "Adaptive Checkpoint" $(get_var innodb_adaptive_checkpoint)
+
+      if [ -s /tmp/percona-toolkit-innodb-status ]; then
+         format_innodb_status /tmp/percona-toolkit-innodb-status
+      fi
+   fi
+
+   # ########################################################################
+   # MyISAM
+   # ########################################################################
+   section MyISAM
+   buf_size=$(get_var key_buffer_size)
+   blk_size=$(get_var key_cache_block_size)
+   blk_unus=$(get_stat Key_blocks_unused)
+   blk_unfl=$(get_stat Key_blocks_not_flushed)
+   unus=$((${blk_unus} * ${blk_size}))
+   unfl=$((${blk_unfl} * ${blk_size}))
+   used=$((${buf_size} - ${unus}))
+   name_val "Key Cache" "$(shorten ${buf_size} 1)"
+   name_val "Pct Used" "$(fuzzy_pct ${used} ${buf_size})"
+   name_val "Unflushed" "$(fuzzy_pct ${unfl} ${buf_size})"
+
+   # ########################################################################
+   # Users & Security
+   # ########################################################################
+   section Security
+   users="$(mysql "$@" -ss \
+      -e 'SELECT COUNT(*), SUM(user=""), SUM(password=""), SUM(password NOT LIKE "*%") FROM mysql.user' 2>/dev/null \
+      | $AP_AWK '{printf "%d users, %d anon, %d w/o pw, %d old pw\n", $1, $2, $3, $4}')"
+   name_val Users "${users}"
+   name_val "Old Passwords" $(get_var old_passwords)
+
+   # ########################################################################
+   # Binary Logging
+   # ########################################################################
+   section Binary_Logging
+   binlog=$(get_var log_bin)
+   if [ "${binlog}" ]; then
+      mysql "$@" -ss -e 'SHOW MASTER LOGS' > /tmp/percona-toolkit 2>/dev/null
+      summarize_binlogs /tmp/percona-toolkit
+      format="$(get_var binlog_format)"
+      name_val binlog_format "${format:-STATEMENT}"
+      name_val expire_logs_days $(get_var expire_logs_days)
+      name_val sync_binlog $(get_var sync_binlog)
+      name_val server_id $(get_var server_id)
+      mysql "$@" -ss -e 'SHOW MASTER STATUS' > /tmp/percona-toolkit 2>/dev/null
+      format_binlog_filters /tmp/percona-toolkit
+   fi
+
+# Replication: seconds behind, running, filters, skip_slave_start, skip_errors,
+# read_only, temp tables open, slave_net_timeout, slave_exec_mode
+
+   # ########################################################################
+   # Interesting things that you just ought to know about.
+   # ########################################################################
+   section Noteworthy_Variables
+   name_val "Auto-Inc Incr/Offset" "$(get_var auto_increment_increment)/$(get_var auto_increment_offset)"
+   for v in \
+      default_storage_engine flush_time init_connect init_file sql_mode;
+   do
+      name_val ${v} $(get_var ${v})
+   done
+   for v in \
+      join_buffer_size sort_buffer_size read_buffer_size read_rnd_buffer_size \
+      bulk_insert_buffer max_heap_table_size tmp_table_size \
+      max_allowed_packet thread_stack;
+   do
+      name_val ${v} $(shorten $(get_var ${v}))
+   done
+   for v in log log_error log_warnings log_slow_queries \
+         log_queries_not_using_indexes log_slave_updates;
+   do
+      name_val ${v} $(get_var ${v})
+   done
+
+   # ########################################################################
+   # If there is a my.cnf in a standard location, see if we can pretty-print it.
+   # ########################################################################
+   section Configuration_File
+   ps auxww 2>/dev/null | $AP_GREP mysqld > /tmp/percona-toolkit
+   cnf_file=$(find_my_cnf_file /tmp/percona-toolkit ${port});
+   if [ ! -e "${cnf_file}" ]; then
+      name_val "Config File" "Cannot autodetect, trying common locations"
+      cnf_file="/etc/my.cnf";
+   fi
+   if [ ! -e "${cnf_file}" ]; then
+      cnf_file="/etc/mysql/my.cnf";
+   fi
+   if [ ! -e "${cnf_file}" ]; then
+      cnf_file="/var/db/mysql/my.cnf";
+   fi
+   if [ -e "${cnf_file}" ]; then
+      name_val "Config File" "${cnf_file}"
+      cat "${cnf_file}" > /tmp/percona-toolkit
+      pretty_print_cnf_file /tmp/percona-toolkit
+   else
+      name_val "Config File" "Cannot autodetect or find, giving up"
+   fi
+
+   temp_files "rm"
+
+   # Make sure that we signal the end of the tool's output.
+   section The_End
+}
+
+# Execute the program if it was not included from another file.  This makes it
+# possible to include without executing, and thus test.
+if [ "$(basename "$0")" = "pt-mysql-summary" ]; then main "$@"; fi
+
+# ############################################################################
+# Documentation
+# ############################################################################
+:<<'DOCUMENTATION'
+=pod
+
+=head1 NAME
+
+pt-mysql-summary - Summarize MySQL information in a nice way.
+
+=head1 SYNOPSIS
+
+Usage: pt-mysql-summary [MYSQL-OPTIONS]
+
+pt-mysql-summary conveniently summarizes the status and configuration of a
+MySQL database server so that you can learn about it at a glance.  It is not
+a tuning tool or diagnosis tool.  It produces a report that is easy to diff
+and can be pasted into emails without losing the formatting.  It should work
+well on any modern UNIX systems.
+
+=head1 RISKS
+
+The following section is included to inform users about the potential risks,
+whether known or unknown, of using this tool.  The two main categories of risks
+are those created by the nature of the tool (e.g. read-only tools vs. read-write
+tools) and those created by bugs.
+
+pt-mysql-summary is a read-only tool.  It should be very low-risk.
+
+At the time of this release, we know of no bugs that could cause serious harm
+to users.
+
+The authoritative source for updated information is always the online issue
+tracking system.  Issues that affect this tool will be marked as such.  You can
+see a list of such issues at the following URL:
+L<http://www.percona.com/bugs/pt-mysql-summary>.
+
+See also L<"BUGS"> for more information on filing bugs and getting help.
+
+=head1 DESCRIPTION
+
+pt-mysql-summary works by connecting to a MySQL database server and querying
+it for status and configuration information.  It saves these bits of data
+into files in /tmp, and then formats them neatly with awk and other scripting
+languages.
+
+To use, simply execute it.  Optionally add the same command-line options
+you would use to connect to MySQL, like  C<pt-mysql-summary --user=foo>.
+
+The tool interacts minimally with the server upon which it runs.  It assumes
+that you'll run it on the same server you're inspecting, and therefore it
+assumes that it will be able to find the my.cnf configuration file, for
+example.  However, it should degrade gracefully if this is not the case.
+Note, however, that its output does not indicate which information comes from
+the MySQL database and which comes from the host operating system, so it is
+possible for confusing output to be generated if you run the tool on one
+server and direct it to connect to a MySQL database server running on another
+server.
+
+=head1 Fuzzy-Rounding
+
+Many of the outputs from this tool are deliberately rounded to show their
+magnitude but not the exact detail.  This is called fuzzy-rounding. The idea
+is that it doesn't matter whether a server is running 918 queries per second
+or 921 queries per second; such a small variation is insignificant, and only
+makes the output hard to compare to other servers.  Fuzzy-rounding rounds in
+larger increments as the input grows.  It begins by rounding to the nearest 5,
+then the nearest 10, nearest 25, and then repeats by a factor of 10 larger
+(50, 100, 250), and so on, as the input grows.
+
+=head1 OPTIONS
+
+This tool does not have any command-line options of its own.  All options
+are passed to C<mysql>.
+
+=head1 ENVIRONMENT
+
+This tool does not use any environment variables.
+
+=head1 SYSTEM REQUIREMENTS
+
+This tool requires Bash v3 or newer.
+
+=head1 BUGS
+
+For a list of known bugs, see L<http://www.percona.com/bugs/pt-mysql-summary>.
+
+Please report bugs at L<https://bugs.launchpad.net/percona-toolkit>.
+Include the following information in your bug report:
+
+=over
+
+=item * Complete command-line used to run the tool
+
+=item * Tool L<"--version">
+
+=item * MySQL version of all servers involved
+
+=item * Output from the tool including STDERR
+
+=item * Input files (log/dump/config files, etc.)
+
+=back
+
+If possible, include debugging output by running the tool with C<PTDEBUG>;
+see L<"ENVIRONMENT">.
+
+=head1 DOWNLOADING
+
+Visit L<http://www.percona.com/software/percona-toolkit/> to download the
+latest release of Percona Toolkit.  Or, get the latest release from the
+command line:
+
+   wget percona.com/get/percona-toolkit.tar.gz
+
+   wget percona.com/get/percona-toolkit.rpm
+
+   wget percona.com/get/percona-toolkit.deb
+
+You can also get individual tools from the latest release:
+
+   wget percona.com/get/TOOL
+
+Replace C<TOOL> with the name of any tool.
+
+=head1 AUTHORS
+
+Baron Schwartz
+
+=head1 ABOUT PERCONA TOOLKIT
+
+This tool is part of Percona Toolkit, a collection of advanced command-line
+tools developed by Percona for MySQL support and consulting.  Percona Toolkit
+was forked from two projects in June, 2011: Maatkit and Aspersa.  Those
+projects were created by Baron Schwartz and developed primarily by him and
+Daniel Nichter, both of whom are employed by Percona.  Visit
+L<http://www.percona.com/software/> for more software developed by Percona.
+
+=head1 COPYRIGHT, LICENSE, AND WARRANTY
+
+This program is copyright 2010-2011 Baron Schwartz, 2011 Percona Inc.
+Feedback and improvements are welcome.
+
+THIS PROGRAM IS PROVIDED "AS IS" AND WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 2; OR the Perl Artistic License.  On UNIX and similar
+systems, you can issue `man perlgpl' or `man perlartistic' to read these
+licenses.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA  02111-1307  USA.
+
+=head1 VERSION
+
+pt-mysql-summary 1.0.1
+
+=cut
+
+DOCUMENTATION
